@@ -1,4 +1,4 @@
-# token-runway
+# cc-meter
 
 A Claude Code mod that shows how much of your plan's usage limits you have used, when each limit resets, and how long the rest is likely to last. It also counts the current session's tokens and sums every transcript on your machine into daily, per-project and per-model views, priced at API list prices.
 
@@ -8,7 +8,7 @@ A Claude Code mod that shows how much of your plan's usage limits you have used,
 
 **Band above the prompt**: the session's cost and tokens, context use, and each limit window (5-hour, weekly) with its percent, reset countdown and a fill-time forecast. It has buttons to open the pane or hide the band.
 
-**Pane** (`/token-runway`, or the band's button), with two views:
+**Pane** (`/cc-meter`, or the band's button), with two views:
 
 | View | Contents |
 |---|---|
@@ -24,7 +24,7 @@ Requires Claude Code 2.1.287 or later (mods support). The machine view needs Nod
 In a terminal session:
 
 ```
-/plugin install token-runway --marketplace CookPiu/token-runway
+/plugin install cc-meter --marketplace CookPiu/cc-meter
 ```
 
 Answer `y` to add the marketplace and choose a scope. Installed at user scope, it also loads in sessions the desktop app starts.
@@ -38,7 +38,7 @@ Set them in `/config` under the plugin:
 | `language` | `auto` | `auto`, `en` or `zh` |
 | `nodePath` | `node` | The Node.js used to read transcript history |
 
-To price models at other rates (Bedrock, Vertex, a gateway) or to add models the built-in table lacks, write `<config>/token-runway/prices.json`, with prices in USD per million tokens as `[input, output, cache read, cache write 5m, cache write 1h]`, keyed by model id or id prefix:
+To price models at other rates (Bedrock, Vertex, a gateway) or to add models the built-in table lacks, write `<config>/cc-meter/prices.json`, with prices in USD per million tokens as `[input, output, cache read, cache write 5m, cache write 1h]`, keyed by model id or id prefix:
 
 ```json
 { "claude-opus-5-5": [4, 20, 0.2, 5, 8] }
@@ -53,7 +53,7 @@ Claude Code reports each limit only as a percent and a reset time. To turn that 
 - every rise of 5 points or more within a window, and every limit hit (a whole window), is one observation;
 - the fit is `rise × plan multiple ≈ Σ model factor × Σ token-kind factor × API spend`, solved by Levenberg–Marquardt in log parameters with weak priors and Huber reweighting;
 - token-kind factors capture that limits weigh kinds differently from API prices (cache reads count for much less, so one long session lasts longer than many short ones);
-- a plan timeline (`<config>/token-runway/plans.json`, recorded automatically when the plan tier changes and editable in the pane) lets windows from different plans share one fit, with each plan's multiple fitted rather than taken as sold.
+- a plan timeline (`<config>/cc-meter/plans.json`, recorded automatically when the plan tier changes and editable in the pane) lets windows from different plans share one fit, with each plan's multiple fitted rather than taken as sold.
 
 The pane shows the confidence and the fitted factors. Use from claude.ai or other devices counts in the official percent but not in this machine's transcripts, which makes estimates less certain. How Anthropic counts limits is not published; these figures are inferences.
 
@@ -64,7 +64,7 @@ Everything stays on your machine. The mod makes no network requests.
 - **Reads** Claude Code's transcripts under `<config>/projects/` to count tokens; message text is parsed only to find turn boundaries and is never stored or sent.
 - **Reads** the `subscriptionType` and `rateLimitTier` fields of `<config>/.credentials.json` to note plan changes. No token or other field is kept. On macOS the credentials live in the Keychain, which the mod does not read; edit the timeline in the pane instead.
 - **Reads** Claude Code's `language` setting and the `CLAUDE_CONFIG_DIR`, `HOME`, `USERPROFILE`, `LC_ALL` and `LANG` environment variables.
-- **Writes** `<config>/token-runway/cache.json` (per-file read offsets and 10-minute sums, so later scans read only new lines) and `<config>/token-runway/plans.json` (the plan timeline), plus limit readings in the plugin's own store.
+- **Writes** `<config>/cc-meter/cache.json` (per-file read offsets and 10-minute sums, so later scans read only new lines) and `<config>/cc-meter/plans.json` (the plan timeline), plus limit readings in the plugin's own store.
 - **Runs** the bundled `scan/scan.mjs` with Node.js, because transcripts are larger than the mod environment can read.
 
 ## Development

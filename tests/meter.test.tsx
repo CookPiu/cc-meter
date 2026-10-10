@@ -2,7 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import { fmtDuration, fmtTokens, forecast } from '../hooks/register'
 
-const PLUGIN = 'token-runway'
+const PLUGIN = 'cc-meter'
 const MIN = 60_000
 const T0 = Date.parse('2026-10-10T08:00:00Z')
 
@@ -14,7 +14,7 @@ const band = {
 const pane = {
   plugin: PLUGIN,
   component: 'Pane' as const,
-  requestId: 'token-runway',
+  requestId: 'cc-meter',
   props: { title: 'Token 用量', isFocused: false, bodyColumns: 70, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 60 }, view: {} },
 }
 

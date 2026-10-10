@@ -1,4 +1,4 @@
-// The words token-runway draws, in each language it speaks. English is the fallback and the
+// The words cc-meter draws, in each language it speaks. English is the fallback and the
 // shape every other table follows; a new language is one more table of the same type.
 
 export type Locale = 'en' | 'zh'
@@ -110,10 +110,10 @@ const en = {
   planField: 'Plan',
   dateField: 'From',
   add: 'Add',
-  badDate: 'token-runway: write the date as YYYY-MM-DD',
-  planDetected: (p: string) => `token-runway: plan changed to ${p}, added to the timeline`,
+  badDate: 'cc-meter: write the date as YYYY-MM-DD',
+  planDetected: (p: string) => `cc-meter: plan changed to ${p}, added to the timeline`,
   dataNote:
-    'From the Claude Code transcripts on this machine (subagents included); claude.ai and other devices are not in them. API-equivalent uses list prices (override in token-runway/prices.json). Estimates fit pieces of 5 points or more and past limit hits, as model factor × token kind factor and plan multiples. How limits are counted is not published: these are inferences.',
+    'From the Claude Code transcripts on this machine (subagents included); claude.ai and other devices are not in them. API-equivalent uses list prices (override in cc-meter/prices.json). Estimates fit pieces of 5 points or more and past limit hits, as model factor × token kind factor and plan multiples. How limits are counted is not published: these are inferences.',
   unpriced: (list: string) => ` Not priced, counted as 0: ${list}.`,
 }
 
@@ -212,10 +212,10 @@ const zh: Messages = {
   planField: '套餐',
   dateField: '生效日期',
   add: '添加',
-  badDate: 'token-runway: 日期请写成 YYYY-MM-DD',
-  planDetected: p => `token-runway: 检测到套餐变为 ${p}，已记入时间线`,
+  badDate: 'cc-meter: 日期请写成 YYYY-MM-DD',
+  planDetected: p => `cc-meter: 检测到套餐变为 ${p}，已记入时间线`,
   dataNote:
-    '数据来自本机的 Claude Code 会话记录（含子代理），不含网页版和其他设备。折算按官方 API 价格（可用 token-runway/prices.json 覆盖）。推算用每涨 5 个点的分段和历史触限，拟合模型系数 × token 类型系数与套餐倍数；限额的真实算法未公开，结果是推断。',
+    '数据来自本机的 Claude Code 会话记录（含子代理），不含网页版和其他设备。折算按官方 API 价格（可用 cc-meter/prices.json 覆盖）。推算用每涨 5 个点的分段和历史触限，拟合模型系数 × token 类型系数与套餐倍数；限额的真实算法未公开，结果是推断。',
   unpriced: list => ` 未定价、按 0 计：${list}。`,
 }
 
