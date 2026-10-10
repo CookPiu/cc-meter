@@ -873,6 +873,7 @@ let fitMemo: { key: string; fits: Record<string, Fit> } | null = null
 async function scanAll($: EngineInterface, isShown = false): Promise<void> {
   if (isScanning) return
   isScanning = true
+  animate($)
   if (isShown) await update($, scanStatus, () => ({ state: 'scanning' as const }))
   try {
     const config = await configDir($)
@@ -997,13 +998,75 @@ function levelHex(percent: number): string {
   return percent >= 90 ? RED : percent >= 70 ? AMBER : CLAY
 }
 
-// A thin rounded meter.
-function meterSvg(percent: number, width = 240): string {
-  const w = Math.max(0, Math.min(1, percent / 100)) * width
+// ---- Motion -------------------------------------------------------------------
+
+// Whether figures move into place, from the `motion` option.
+let isMotion = true
+// How long a figure takes to move to a new value, and how often the terminal draws it on the way.
+const MOVE_MS = 450
+const FRAME_MS = 50
+// A figure on its way: the value it left, the one it goes to, and when it set off.
+export type Move = { from: number; to: number; at: number }
+// Each figure by where it is drawn: `t:` keys in the terminal, `g:` keys in vector drawings.
+const moves = new Map<string, Move>()
+const easeOut = (x: number) => 1 - (1 - x) ** 3
+
+// The move that takes a figure to this value. It is kept while the value stays, so drawing the
+// same value draws the same thing (a vector drawing does not play again); a new value sets off
+// from wherever the figure is now, and a figure seen for the first time rises from `start`.
+export function moveTo(key: string, value: number, now: number, start = 0): Move {
+  const last = moves.get(key)
+  if (last !== undefined && last.to === value) return last
+  const from = !isMotion ? value : last === undefined ? start : positionOf(last, now)
+  const move = { from, to: value, at: now }
+  moves.set(key, move)
+  return move
+}
+
+export function positionOf(move: Move, now: number): number {
+  const x = Math.min(1, Math.max(0, (now - move.at) / MOVE_MS))
+  return move.from + (move.to - move.from) * easeOut(x)
+}
+
+const isOnTheWay = (move: Move, now: number) => move.from !== move.to && now - move.at < MOVE_MS
+
+// SMIL that moves one attribute of a shape from where it was to where it is drawn, easing out;
+// nothing when it does not move.
+function glide(attribute: string, move: Move): string {
+  if (move.from === move.to) return ''
+  return `<animate attributeName="${attribute}" from="${move.from.toFixed(1)}" to="${move.to.toFixed(1)}" dur="${MOVE_MS}ms" calcMode="spline" keyTimes="0;1" keySplines="0.22 1 0.36 1" fill="freeze"/>`
+}
+
+// The braille spinner a scan turns while it runs.
+const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+const spinnerAt = (now: number) => SPINNER[Math.floor(now / 80) % SPINNER.length]!
+
+// The terminal is drawn again every frame while a figure there is on its way or a scan runs, and
+// the frames stop when neither is.
+let ticker: { cancel: () => void } | null = null
+function animate($: EngineInterface): void {
+  if (ticker !== null || !isMotion) return
+  ticker = $.clock.every(FRAME_MS, () => {
+    void $.clock.now().then(now => {
+      const isBusy = isScanning || [...moves].some(([key, move]) => key.startsWith('t:') && isOnTheWay(move, now - FRAME_MS))
+      $.ui.invalidate('ui.render')
+      if (!isBusy) {
+        ticker?.cancel()
+        ticker = null
+      }
+    })
+  })
+}
+
+// A thin rounded meter, its fill gliding from the last value it showed.
+export function meterSvg(percent: number, move: Move | null = null, width = 240): string {
+  const px = (p: number) => (p > 0 ? Math.max(6, Math.max(0, Math.min(1, p / 100)) * width) : 0)
+  const fill = move === null ? null : { from: px(move.from), to: px(move.to), at: move.at }
+  const w = px(percent)
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="6" viewBox="0 0 ${width} 6">` +
     `<rect width="${width}" height="6" rx="3" fill="${STONE}" fill-opacity="0.22"/>` +
-    (w > 0 ? `<rect width="${Math.max(6, w).toFixed(1)}" height="6" rx="3" fill="${levelHex(percent)}"/>` : '') +
+    (w > 0 || (fill !== null && fill.from > 0) ? `<rect width="${w.toFixed(1)}" height="6" rx="3" fill="${levelHex(percent)}">${fill === null ? '' : glide('width', fill)}</rect>` : '') +
     `</svg>`
   )
 }
@@ -1037,8 +1100,12 @@ function stackSvg(parts: readonly { value: number; color: string; label: string 
   )
 }
 
-// Small bars over time, each with its own hover text; the last one stands out.
-function sparkSvg(items: readonly { value: number; title: string; label?: string }[], width = 240, height = 36): string {
+// Hover lights one bar and dims the rest.
+const HOVER_STYLE = '<style>.b{transition:opacity .15s ease-out}svg:hover .b{opacity:.45}g:hover .b{opacity:1}</style>'
+
+// Small bars over time, each with its own hover text; the last one stands out. With a key, each
+// bar grows from where it stood, by its own id.
+function sparkSvg(items: readonly { value: number; title: string; label?: string; id?: string }[], width = 240, height = 36, key: string | null = null, now = 0): string {
   const n = items.length
   const gap = n > 40 ? 1 : 2
   const barWidth = Math.max(2, (width - gap * (n - 1)) / Math.max(n, 1))
@@ -1051,18 +1118,20 @@ function sparkSvg(items: readonly { value: number; title: string; label?: string
       const x = i * (barWidth + gap)
       const fill = i === n - 1 ? CLAY : CLAY_SOFT
       const label = item.label ? `<text x="${x.toFixed(1)}" y="${height - 1}" font-size="9" fill="${STONE}">${escapeXml(item.label)}</text>` : ''
+      const id = `${key}:${item.id ?? i}`
+      const motion = key === null ? '' : glide('height', moveTo(`${id}:h`, barH, now)) + glide('y', moveTo(`${id}:y`, chart - barH, now, chart))
       return (
         `<g><title>${escapeXml(item.title)}</title>` +
         `<rect x="${x.toFixed(1)}" y="0" width="${barWidth.toFixed(1)}" height="${chart}" fill="transparent"/>` +
-        `<rect x="${x.toFixed(1)}" y="${(chart - barH).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${barH.toFixed(1)}" rx="1" fill="${fill}"/></g>${label}`
+        `<rect class="b" x="${x.toFixed(1)}" y="${(chart - barH).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${barH.toFixed(1)}" rx="1" fill="${fill}">${motion}</rect></g>${label}`
       )
     })
     .join('')
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="system-ui, sans-serif">${bars}</svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="system-ui, sans-serif">${HOVER_STYLE}${bars}</svg>`
 }
 
 // Stacked bars of each day's cost by model, the top models apart and the rest as one.
-function dailySvg(daily: GlobalView['daily'], models: readonly string[], width = 240, height = 64): string {
+function dailySvg(daily: GlobalView['daily'], models: readonly string[], width = 240, height = 64, key: string | null = null, now = 0): string {
   const n = daily.length
   const gap = n > 40 ? 1 : 2
   const barWidth = Math.max(1.5, (width - gap * (n - 1)) / Math.max(n, 1))
@@ -1080,7 +1149,10 @@ function dailySvg(daily: GlobalView['daily'], models: readonly string[], width =
         .map((cost, k) => {
           const segH = (cost / max) * chart
           y -= segH
-          return segH > 0 ? `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${segH.toFixed(1)}" fill="${SERIES[Math.min(k, 3)]}"/>` : ''
+          if (segH <= 0) return ''
+          const id = `${key}:${d.day}:${k}`
+          const motion = key === null ? '' : glide('height', moveTo(`${id}:h`, segH, now)) + glide('y', moveTo(`${id}:y`, y, now, chart))
+          return `<rect class="b" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${segH.toFixed(1)}" fill="${SERIES[Math.min(k, 3)]}">${motion}</rect>`
         })
         .join('')
       const detail = Object.entries(d.byModel)
@@ -1092,7 +1164,7 @@ function dailySvg(daily: GlobalView['daily'], models: readonly string[], width =
       return `<g><title>${escapeXml(`${d.day}  ${fmtUsd(totalOf(d))}${detail ? `\n${detail}` : ''}`)}</title><rect x="${x.toFixed(1)}" y="0" width="${barWidth.toFixed(1)}" height="${chart}" fill="transparent"/>${rects}</g>${label}`
     })
     .join('')
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="system-ui, sans-serif">${bars}</svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="system-ui, sans-serif">${HOVER_STYLE}${bars}</svg>`
 }
 
 // The terminal's sparkline: one block per value, eight heights.
@@ -1120,6 +1192,7 @@ async function openGlobal($: EngineInterface): Promise<void> {
 
 export const register: Register = (on, options) => {
   nodeBin = typeof options.nodePath === 'string' && options.nodePath.trim() !== '' ? options.nodePath.trim() : 'node'
+  isMotion = options.motion !== 'off'
   const language = typeof options.language === 'string' ? options.language : 'auto'
   setLocale(localeOf(language) ?? 'en')
 
@@ -1313,15 +1386,21 @@ export const register: Register = (on, options) => {
         ))}
       </Box>
     )
-    const meter = (percent: number) =>
-      Svg !== undefined ? (
-        <Svg source={meterSvg(percent)} alt={`${percent}%`} />
-      ) : (
+    // A meter glides to a new value: SMIL in a vector drawing, frame by frame in the terminal.
+    const meter = (key: string, percent: number) => {
+      if (Svg !== undefined) {
+        return <Svg source={meterSvg(percent, moveTo(`g:meter:${key}`, percent, now))} alt={`${percent}%`} isInteractive={isMotion ? true : undefined} />
+      }
+      const move = moveTo(`t:meter:${key}`, percent, now)
+      if (isOnTheWay(move, now)) animate($)
+      const filled = Math.round((Math.min(100, positionOf(move, now)) / 100) * lineWidth)
+      return (
         <Text>
-          <Text color={levelHex(percent)}>{'━'.repeat(Math.round((Math.min(100, percent) / 100) * lineWidth))}</Text>
-          <Text dimColor>{'─'.repeat(lineWidth - Math.round((Math.min(100, percent) / 100) * lineWidth))}</Text>
+          <Text color={levelHex(percent)}>{'━'.repeat(filled)}</Text>
+          <Text dimColor>{'─'.repeat(lineWidth - filled)}</Text>
         </Text>
       )
+    }
     // Rows of names with a share bar, an amount and a share, the largest first.
     const ranked = (items: readonly { name: string; value: number; amount: string }[], total: number) => {
       const max = Math.max(...items.map(i => i.value), 1e-9)
@@ -1380,7 +1459,7 @@ export const register: Register = (on, options) => {
                   <Box width={11}>
                     <Text>{windowLabel(w.kind)}</Text>
                   </Box>
-                  {meter(w.percentUsed)}
+                  {meter(w.kind, w.percentUsed)}
                   <Text bold color={w.percentUsed >= 70 ? levelHex(w.percentUsed) : undefined}>
                     {w.percentUsed}%
                   </Text>
@@ -1468,7 +1547,12 @@ export const register: Register = (on, options) => {
                   recent.map(r => ({
                     value: sum(r.tokens),
                     title: t.turnTitle(r.n, fmtTokens(sum(r.tokens)), fmtTokens(r.tokens.output), fmtTokens(r.tokens.cacheWrite), fmtTokens(r.tokens.cacheRead), r.subagentTurns),
+                    id: String(r.n),
                   })),
+                  240,
+                  36,
+                  isMotion ? 'g:turns' : null,
+                  now,
                 )}
                 alt={recent.map(r => t.turnAlt(r.n, fmtTokens(sum(r.tokens)))).join(', ')}
                 isInteractive
@@ -1492,6 +1576,8 @@ export const register: Register = (on, options) => {
     // The global view.
     const status = await read($, scanStatus)
     const isOpen = await read($, details)
+    // A scan in flight turns a spinner after the status, the line's end, so nothing else moves.
+    const spinner = isScanning ? ` ${spinnerAt(now)}` : ''
     const statusText =
       status.state === 'scanning'
         ? t.scanning
@@ -1507,7 +1593,7 @@ export const register: Register = (on, options) => {
         <Button key="range-30d" label={t.range30} variant={span === '30d' ? 'primary' : 'secondary'} onPress={() => update($, range, () => '30d' as const)} />
         <Button key="range-all" label={t.rangeAll} variant={span === 'all' ? 'primary' : 'secondary'} onPress={() => update($, range, () => 'all' as const)} />
         <Button key="rescan" label={t.refresh} dimColor onPress={() => void scanAll($, true)} />
-        {status.state === 'error' ? <Text color={RED}>{statusText}</Text> : <Text dimColor>{statusText}</Text>}
+        {status.state === 'error' ? <Text color={RED}>{statusText}</Text> : <Text dimColor>{`${statusText}${spinner}`}</Text>}
       </Box>
     )
     if (scan === null || g === null) {
@@ -1516,7 +1602,7 @@ export const register: Register = (on, options) => {
           {tabs}
           {limits}
           {controls}
-          <Text dimColor>{t.firstScan}</Text>
+          <Text dimColor>{`${t.firstScan}${spinner}`}</Text>
           {close}
         </Box>
       )
@@ -1651,7 +1737,7 @@ export const register: Register = (on, options) => {
           {g.daily.length === 0 ? (
             <Text dimColor>{t.noUsage}</Text>
           ) : Svg !== undefined ? (
-            <Svg source={dailySvg(g.daily, top)} alt={g.daily.map(d => `${d.day} ${fmtUsd(Object.values(d.byModel).reduce((a, b) => a + b, 0))}`).join(', ')} isInteractive />
+            <Svg source={dailySvg(g.daily, top, 240, 64, isMotion ? `g:daily:${span}` : null, now)} alt={g.daily.map(d => `${d.day} ${fmtUsd(Object.values(d.byModel).reduce((a, b) => a + b, 0))}`).join(', ')} isInteractive />
           ) : (
             <Box flexDirection="column">
               <Text color={CLAY}>{sparkText(g.daily.slice(-lineWidth * 2).map(d => Object.values(d.byModel).reduce((a, b) => a + b, 0)))}</Text>

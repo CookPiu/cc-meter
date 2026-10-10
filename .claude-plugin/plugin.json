@@ -36,6 +36,16 @@
       "title": "Node.js",
       "description": "The Node.js 18+ that reads transcript history: a command on PATH or a full path",
       "default": "node"
+    },
+    "motion": {
+      "type": "string",
+      "title": "Motion",
+      "description": "on lets meters and charts glide to new values and a spinner turn while scanning; off draws them still",
+      "default": "on",
+      "options": [
+        "on",
+        "off"
+      ]
     }
   }
 }

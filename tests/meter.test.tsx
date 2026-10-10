@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { fmtDuration, fmtTokens, forecast } from '../hooks/register'
+import { fmtDuration, fmtTokens, forecast, meterSvg, moveTo, positionOf } from '../hooks/register'
 
 const PLUGIN = 'token-almanac'
 const MIN = 60_000
@@ -131,4 +131,34 @@ test('turns, models, limits and context reach the band and the pane', { options:
   }
   // Readings were kept for a restart within the same window.
   expect(Object.keys(store.samples as object).sort()).toEqual(['five_hour', 'seven_day'])
+})
+
+describe('motion', () => {
+  test('a figure rises from zero once, keeps its move while the value stays, and sets off from where it is', () => {
+    const first = moveTo('test:a', 40, T0)
+    expect([first.from, first.to]).toEqual([0, 40])
+    // Drawn again with the same value: the same move, so a vector drawing does not play again.
+    expect(moveTo('test:a', 40, T0 + 5_000)).toBe(first)
+    expect(positionOf(first, T0)).toBe(0)
+    expect(positionOf(first, T0 + 10_000)).toBe(40)
+    // Halfway through a move to 60, a move to 20 sets off from where the figure is drawn.
+    const up = moveTo('test:b', 60, T0, 60)
+    expect(up.from).toBe(60)
+    const back = moveTo('test:b', 20, T0)
+    expect(back.from).toBe(60)
+    const mid = positionOf(back, T0 + 200)
+    expect(mid < 60 && mid > 20).toBe(true)
+    expect(moveTo('test:b', 30, T0 + 200).from).toBe(mid)
+  })
+
+  test('a meter drawn twice at one value is the same drawing; a new value glides', () => {
+    const at40 = moveTo('test:meter', 40, T0)
+    const a = meterSvg(40, at40)
+    expect(meterSvg(40, moveTo('test:meter', 40, T0 + 30_000))).toBe(a)
+    expect(a).toContain('<animate attributeName="width" from="0.0" to="96.0"')
+    const b = meterSvg(55, moveTo('test:meter', 55, T0 + 60_000))
+    expect(b).toContain('from="96.0" to="132.0"')
+    // Without a move, a still meter.
+    expect(meterSvg(55)).not.toContain('<animate')
+  })
 })

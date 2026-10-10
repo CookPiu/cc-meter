@@ -44,6 +44,7 @@ Set them in `/config` under the plugin:
 |---|---|---|
 | `language` | `auto` | `auto`, `en` or `zh` |
 | `nodePath` | `node` | The Node.js used to read transcript history |
+| `motion` | `on` | `on` lets meters and charts glide to new values and a spinner turn while scanning; `off` draws them still |
 
 To price models at other rates (Bedrock, Vertex, a gateway) or to add models the built-in table lacks, write `<config>/token-almanac/prices.json`, with prices in USD per million tokens as `[input, output, cache read, cache write 5m, cache write 1h]`, keyed by model id or id prefix:
 

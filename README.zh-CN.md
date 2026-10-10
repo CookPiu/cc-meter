@@ -44,6 +44,7 @@ claude plugin install token-almanac --marketplace CookPiu/token-almanac
 |---|---|---|
 | `language` | `auto` | `auto`、`en` 或 `zh` |
 | `nodePath` | `node` | 读取历史记录用的 Node.js |
+| `motion` | `on` | `on` 时进度条和图表平滑过渡到新数值、扫描时显示转动的指示；`off` 时静态显示 |
 
 要按其他渠道价格（Bedrock、Vertex、网关）折算，或补充内置价格表没有的模型，可写 `<config>/token-almanac/prices.json`，单位为每百万 token 美元，顺序 `[input, output, cache 读, cache 写 5m, cache 写 1h]`，键为模型 id 或前缀：
 
