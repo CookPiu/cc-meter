@@ -63,10 +63,10 @@ export function fmtTokens(n: number): string {
 export function fmtDuration(ms: number): string {
   const minutes = Math.max(0, Math.round(ms / MINUTE))
   const d = Math.floor(minutes / 1440)
-  const h = Math.floor((minutes % 1440) / 60)
+  const hrs = Math.floor((minutes % 1440) / 60)
   const m = minutes % 60
-  if (d > 0) return `${d}d${h}h`
-  if (h > 0) return `${h}h${m}m`
+  if (d > 0) return `${d}d${hrs}h`
+  if (hrs > 0) return `${hrs}h${m}m`
   return `${m}m`
 }
 
@@ -366,7 +366,7 @@ export function segmentsOf(kind: string, all: readonly Observation[]): Segment[]
     Object.fromEntries(Object.entries(a).map(([m, c]) => [m, c.map((x, k) => Math.max(0, x - (b[m]?.[k] ?? 0)))]))
   const out: Segment[] = []
   for (const [window, list] of byWindow) {
-    for (const h of list.filter(o => o.hit)) out.push({ window, plan: h.plan ?? CURRENT, dy: 1, c: kindsOf(h.byModel), hit: true })
+    for (const obs of list.filter(o => o.hit)) out.push({ window, plan: obs.plan ?? CURRENT, dy: 1, c: kindsOf(obs.byModel), hit: true })
     let anchor = { y: 0, c: {} as Record<string, number[]> }
     for (const o of list.filter(o => !o.hit).sort((a, b) => a.t - b.t)) {
       if (o.y - anchor.y < 0.05) continue
@@ -605,9 +605,9 @@ export function fittedWindow(
   const perHour = new Array<number>(24).fill(0)
   const usdHour = new Array<number>(24).fill(0)
   for (const [m, hours] of Object.entries(hourly)) {
-    hours.forEach((kinds, h) => {
-      perHour[h]! += ((fit.f[m] ?? 1) * kinds.reduce((acc, x, k) => acc + fit.g[k]! * x, 0)) / s
-      usdHour[h]! += kinds.reduce((a, b) => a + b, 0)
+    hours.forEach((kinds, hour) => {
+      perHour[hour]! += ((fit.f[m] ?? 1) * kinds.reduce((acc, x, k) => acc + fit.g[k]! * x, 0)) / s
+      usdHour[hour]! += kinds.reduce((a, b) => a + b, 0)
     })
   }
   // Dollars per whole window: this window's if it has spent enough to say, else the day's average.
@@ -906,14 +906,14 @@ function sparkSvg(items: readonly { value: number; title: string; label?: string
   const chart = labelled ? height - 12 : height
   const bars = items
     .map((item, i) => {
-      const h = Math.max(item.value > 0 ? 1.5 : 0, (item.value / max) * chart)
+      const barH = Math.max(item.value > 0 ? 1.5 : 0, (item.value / max) * chart)
       const x = i * (barWidth + gap)
       const fill = i === n - 1 ? CLAY : CLAY_SOFT
       const label = item.label ? `<text x="${x.toFixed(1)}" y="${height - 1}" font-size="9" fill="${STONE}">${escapeXml(item.label)}</text>` : ''
       return (
         `<g><title>${escapeXml(item.title)}</title>` +
         `<rect x="${x.toFixed(1)}" y="0" width="${barWidth.toFixed(1)}" height="${chart}" fill="transparent"/>` +
-        `<rect x="${x.toFixed(1)}" y="${(chart - h).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" rx="1" fill="${fill}"/></g>${label}`
+        `<rect x="${x.toFixed(1)}" y="${(chart - barH).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${barH.toFixed(1)}" rx="1" fill="${fill}"/></g>${label}`
       )
     })
     .join('')
@@ -937,9 +937,9 @@ function dailySvg(daily: GlobalView['daily'], models: readonly string[], width =
       let y = chart
       const rects = parts
         .map((cost, k) => {
-          const h = (cost / max) * chart
-          y -= h
-          return h > 0 ? `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${h.toFixed(1)}" fill="${SERIES[Math.min(k, 3)]}"/>` : ''
+          const segH = (cost / max) * chart
+          y -= segH
+          return segH > 0 ? `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${segH.toFixed(1)}" fill="${SERIES[Math.min(k, 3)]}"/>` : ''
         })
         .join('')
       const detail = Object.entries(d.byModel)
