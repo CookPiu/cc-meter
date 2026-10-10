@@ -1,0 +1,40 @@
+{
+  "name": "token-runway",
+  "version": "0.3.0",
+  "description": "Session and machine-wide token usage, plan limit meters with reset countdowns, and an estimate of how long each limit lasts, fitted to your own history.",
+  "author": {
+    "name": "CookPiu",
+    "url": "https://github.com/CookPiu"
+  },
+  "homepage": "https://github.com/CookPiu/token-runway",
+  "repository": "https://github.com/CookPiu/token-runway",
+  "license": "MIT",
+  "keywords": [
+    "usage",
+    "tokens",
+    "rate-limits",
+    "quota",
+    "cost",
+    "mod"
+  ],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "auto follows Claude Code's language setting, then LANG, then the system locale",
+      "default": "auto",
+      "options": [
+        "auto",
+        "en",
+        "zh"
+      ]
+    },
+    "nodePath": {
+      "type": "string",
+      "title": "Node.js",
+      "description": "The Node.js 18+ that reads transcript history: a command on PATH or a full path",
+      "default": "node"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "token-runway",
+  "description": "token-runway: Claude Code usage limits, reset countdowns and fitted capacity estimates.",
+  "owner": {
+    "name": "CookPiu",
+    "url": "https://github.com/CookPiu"
+  },
+  "plugins": [
+    {
+      "name": "token-runway",
+      "source": "./",
+      "description": "Session and machine-wide token usage, plan limit meters with reset countdowns, and how long each limit lasts, fitted to your own history."
+    }
+  ]
+}
