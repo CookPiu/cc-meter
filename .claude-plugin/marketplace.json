@@ -1,13 +1,13 @@
 {
-  "name": "cc-meter",
-  "description": "cc-meter: Claude Code usage limits, reset countdowns and fitted capacity estimates.",
+  "name": "token-almanac",
+  "description": "token-almanac: Claude Code usage limits, reset countdowns and fitted capacity estimates.",
   "owner": {
     "name": "CookPiu",
     "url": "https://github.com/CookPiu"
   },
   "plugins": [
     {
-      "name": "cc-meter",
+      "name": "token-almanac",
       "source": "./",
       "description": "Session and machine-wide token usage, plan limit meters with reset countdowns, and how long each limit lasts, fitted to your own history."
     }

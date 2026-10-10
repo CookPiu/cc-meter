@@ -6,7 +6,7 @@ import type { Fit, GlobalScan, Observation, PlanEntry, Reading, Samples, ScanSta
 import { MESSAGES, localeOf } from './i18n'
 import type { Locale, Messages } from './i18n'
 
-const PANE = 'cc-meter'
+const PANE = 'token-almanac'
 // The plan of every reading when no timeline says otherwise.
 const CURRENT = 'current'
 
@@ -24,20 +24,20 @@ const HOUR = 60 * MINUTE
 const RATE_LOOKBACK_MS = 90 * MINUTE
 const RATE_MIN_SPAN_MS = 10 * MINUTE
 
-const since = atom({ plugin: 'cc-meter', key: 'since' } as const, 0)
-const totals = atom({ plugin: 'cc-meter', key: 'totals' } as const, ZERO)
-const byModel = atom({ plugin: 'cc-meter', key: 'byModel' } as const, {} as Record<string, Tokens>)
-const turns = atom({ plugin: 'cc-meter', key: 'turns' } as const, [] as TurnRow[])
-const snapshot = atom({ plugin: 'cc-meter', key: 'snapshot' } as const, null as Snapshot | null)
-const samples = atom({ plugin: 'cc-meter', key: 'samples' } as const, {} as Record<string, Samples>)
-const isBandHidden = atom({ plugin: 'cc-meter', key: 'isBandHidden' } as const, false)
-const view = atom({ plugin: 'cc-meter', key: 'view' } as const, 'session' as 'session' | 'global')
-const range = atom({ plugin: 'cc-meter', key: 'range' } as const, '30d' as '30d' | 'all')
-const global = atom({ plugin: 'cc-meter', key: 'global' } as const, null as GlobalScan | null)
-const scanStatus = atom({ plugin: 'cc-meter', key: 'scanStatus' } as const, { state: 'idle' } as ScanStatus)
-const fits = atom({ plugin: 'cc-meter', key: 'fits' } as const, {} as Record<string, Fit>)
-const draftPlan = atom({ plugin: 'cc-meter', key: 'draftPlan' } as const, 'pro')
-const details = atom({ plugin: 'cc-meter', key: 'details' } as const, false)
+const since = atom({ plugin: 'token-almanac', key: 'since' } as const, 0)
+const totals = atom({ plugin: 'token-almanac', key: 'totals' } as const, ZERO)
+const byModel = atom({ plugin: 'token-almanac', key: 'byModel' } as const, {} as Record<string, Tokens>)
+const turns = atom({ plugin: 'token-almanac', key: 'turns' } as const, [] as TurnRow[])
+const snapshot = atom({ plugin: 'token-almanac', key: 'snapshot' } as const, null as Snapshot | null)
+const samples = atom({ plugin: 'token-almanac', key: 'samples' } as const, {} as Record<string, Samples>)
+const isBandHidden = atom({ plugin: 'token-almanac', key: 'isBandHidden' } as const, false)
+const view = atom({ plugin: 'token-almanac', key: 'view' } as const, 'session' as 'session' | 'global')
+const range = atom({ plugin: 'token-almanac', key: 'range' } as const, '30d' as '30d' | 'all')
+const global = atom({ plugin: 'token-almanac', key: 'global' } as const, null as GlobalScan | null)
+const scanStatus = atom({ plugin: 'token-almanac', key: 'scanStatus' } as const, { state: 'idle' } as ScanStatus)
+const fits = atom({ plugin: 'token-almanac', key: 'fits' } as const, {} as Record<string, Fit>)
+const draftPlan = atom({ plugin: 'token-almanac', key: 'draftPlan' } as const, 'pro')
+const details = atom({ plugin: 'token-almanac', key: 'details' } as const, false)
 
 // Kinds of token in the pane's palette: clay for output, its soft tint for cache writes, sand and
 // stone for the reads and plain input that carry least weight.
@@ -168,7 +168,7 @@ const PRICES: Record<string, Vec> = {
 }
 
 // A model's prices by its id, or by the longest id it starts with (a dated or suffixed id).
-// Prices from <config>/cc-meter/prices.json, over the built-in ones: for another provider's
+// Prices from <config>/token-almanac/prices.json, over the built-in ones: for another provider's
 // rates (Bedrock, Vertex), a model this table lacks, or a price change before an update.
 let priceOverrides: Record<string, Vec> = {}
 
@@ -672,7 +672,7 @@ async function transcriptPath($: EngineInterface): Promise<string> {
 async function backfill($: EngineInterface, path: string): Promise<boolean> {
   const run = await $.process.run([nodeBin, `${$.plugin.root}/scan/scan.mjs`, 'session', path], { timeoutMs: 60_000 }).catch(() => null)
   if (run === null || run.exitCode !== 0) {
-    $.ui.log(`cc-meter: could not read ${path}: ${run?.stderr.split('\n')[0] ?? 'node did not run'}`, { to: 'debug' })
+    $.ui.log(`token-almanac: could not read ${path}: ${run?.stderr.split('\n')[0] ?? 'node did not run'}`, { to: 'debug' })
     return false
   }
   const parsed = JSON.parse(run.stdout) as Parsed
@@ -713,7 +713,7 @@ async function resolveLocale($: EngineInterface, option: string): Promise<Locale
 
 async function loadPriceOverrides($: EngineInterface): Promise<void> {
   try {
-    setPriceOverrides(JSON.parse(await $.fs.read(`${await configDir($)}/cc-meter/prices.json`)) as Record<string, unknown>)
+    setPriceOverrides(JSON.parse(await $.fs.read(`${await configDir($)}/token-almanac/prices.json`)) as Record<string, unknown>)
   } catch {
     setPriceOverrides({})
   }
@@ -733,7 +733,7 @@ async function scanAll($: EngineInterface): Promise<void> {
       }),
     )
     const readings = ((await $.store.get('readings')) ?? []) as Reading[]
-    const run = await $.process.run([nodeBin, `${$.plugin.root}/scan/scan.mjs`, 'global', `${config}/projects`, `${config}/cc-meter/cache.json`], {
+    const run = await $.process.run([nodeBin, `${$.plugin.root}/scan/scan.mjs`, 'global', `${config}/projects`, `${config}/token-almanac/cache.json`], {
       timeoutMs: 300_000,
       stdin: JSON.stringify({ windows, readings }),
     })
@@ -778,7 +778,7 @@ async function record($: EngineInterface, u: Pick<SessionUsage, 'context' | 'rat
 
 // The plan timeline file, which the scanner reads to tag each observation with its plan.
 async function planFilePath($: EngineInterface): Promise<string> {
-  return `${await configDir($)}/cc-meter/plans.json`
+  return `${await configDir($)}/token-almanac/plans.json`
 }
 
 async function readPlanFile($: EngineInterface): Promise<PlanFile> {
@@ -988,7 +988,7 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     setLocale(await resolveLocale($, language))
     await loadPriceOverrides($)
-    await $.command.register({ name: 'cc-meter', description: t.commandDescription })
+    await $.command.register({ name: 'token-almanac', description: t.commandDescription })
 
     const now = await $.clock.now()
     if ((await read($, since)) === 0) {
@@ -1081,7 +1081,7 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'cc-meter' }, async $ => {
+  on('command.run', { command: 'token-almanac' }, async $ => {
     await update($, isBandHidden, () => false)
     const opened = await $.ui.open({ id: PANE, title: t.paneTitle })
     return { text: opened.isPlaced ? t.paneOpened : t.paneWaiting }

@@ -26,7 +26,7 @@ test('a session counts each response once, by turn, with its subagents', () => {
     reply(1, '2026-10-10T01:00:05Z', 'claude-opus-5-5', usage(1, 10, 100, 1000, 1000)),
     // A tool result and a command record start no turn.
     line({ type: 'user', message: { content: [{ type: 'tool_result', content: 'ok' }] } }),
-    line({ type: 'user', message: { content: '<command-name>/cc-meter</command-name>' } }),
+    line({ type: 'user', message: { content: '<command-name>/token-almanac</command-name>' } }),
     reply(2, '2026-10-10T01:01:00Z', 'claude-opus-5-5', usage(2, 20, 200, 0)),
     line({ type: 'user', timestamp: '2026-10-10T01:05:00Z', message: { content: [{ type: 'text', text: 'second prompt' }] } }),
     reply(4, '2026-10-10T01:05:10Z', 'claude-opus-5-5', usage(3, 30, 300, 0)),
@@ -56,7 +56,7 @@ test('project labels keep the last two folders', () => {
 })
 
 test('the global scan reads incrementally and sums windows to the bucket', async () => {
-  const dir = await fsp.mkdtemp(join(tmpdir(), 'cc-meter-'))
+  const dir = await fsp.mkdtemp(join(tmpdir(), 'token-almanac-'))
   const projects = join(dir, 'projects')
   const cache = join(dir, 'cache.json')
   await fsp.mkdir(join(projects, 'D--Code-demo', 's1', 'subagents'), { recursive: true })
@@ -96,12 +96,12 @@ test('the global scan reads incrementally and sums windows to the bucket', async
 })
 
 test('limit hits and readings become observations tagged with their plan', async () => {
-  const dir = await fsp.mkdtemp(join(tmpdir(), 'cc-meter-'))
+  const dir = await fsp.mkdtemp(join(tmpdir(), 'token-almanac-'))
   const projects = join(dir, 'projects')
   await fsp.mkdir(join(projects, 'p'), { recursive: true })
-  await fsp.mkdir(join(dir, 'cc-meter'), { recursive: true })
+  await fsp.mkdir(join(dir, 'token-almanac'), { recursive: true })
   await fsp.writeFile(
-    join(dir, 'cc-meter', 'plans.json'),
+    join(dir, 'token-almanac', 'plans.json'),
     JSON.stringify({ plans: [{ from: '2026-08-01', plan: 'pro' }, { from: '2026-09-01', plan: 'max5x' }] }),
   )
   await fsp.writeFile(join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'secret', subscriptionType: 'max', rateLimitTier: 'default_claude_max_5x' } }))

@@ -90,16 +90,16 @@ test('the pane switches to the global view, scans, and changes range', { options
   } as never)
 
   const pane = {
-    plugin: 'cc-meter',
+    plugin: 'token-almanac',
     component: 'Pane' as const,
-    requestId: 'cc-meter',
+    requestId: 'token-almanac',
     props: { title: 'Token 用量', isFocused: true, bodyColumns: 80, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 80 }, view: {} },
   }
   const first = await $.ui.mount({ ...pane, surface: 'terminal' })
   await first.press({ key: 'tab-global' })
   await first.unmount()
   // The scanner ran over the whole projects folder, given the window's start and the readings.
-  expect(runs[0]?.argv.slice(2)).toEqual(['global', 'C:/Users/me/.claude/projects', 'C:/Users/me/.claude/cc-meter/cache.json'])
+  expect(runs[0]?.argv.slice(2)).toEqual(['global', 'C:/Users/me/.claude/projects', 'C:/Users/me/.claude/token-almanac/cache.json'])
   const input = JSON.parse(runs[0]?.stdin ?? '{}') as { windows: Record<string, number>; readings: unknown[] }
   expect(input.windows).toEqual({ five_hour: NOW + 3 * HOUR - 5 * HOUR })
   expect(input.readings).toEqual([[NOW, 'five_hour', 40, NOW + 3 * HOUR]])
@@ -161,9 +161,9 @@ test('the global view leads with what each window holds and has left', { options
   await $.session.measure({ context: { tokens: 1000, window: 200_000, percent: 1 }, rateLimits: [five(25)], cost: { usd: 1 }, changed: ['rateLimits'] } as never)
 
   const pane = {
-    plugin: 'cc-meter',
+    plugin: 'token-almanac',
     component: 'Pane' as const,
-    requestId: 'cc-meter',
+    requestId: 'token-almanac',
     props: { title: 'Token 用量', isFocused: true, bodyColumns: 80, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 80 }, view: {} },
   }
   const first = await $.ui.mount({ ...pane, surface: 'terminal' })

@@ -16,14 +16,14 @@ async function must(ui: { find: (q: never) => Promise<unknown> }, query: object)
 }
 
 const band = {
-  plugin: 'cc-meter',
+  plugin: 'token-almanac',
   component: 'AbovePrompt' as const,
   props: { hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns: 140, scroll: { offset: 0, bodyRows: 6 }, view: {} },
 }
 const pane = {
-  plugin: 'cc-meter',
+  plugin: 'token-almanac',
   component: 'Pane' as const,
-  requestId: 'cc-meter',
+  requestId: 'token-almanac',
   props: { title: 'Token usage', isFocused: false, bodyColumns: 70, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 60 }, view: {} },
 }
 
@@ -170,11 +170,11 @@ describe('plans', () => {
 })
 
 test('a tier change into an empty timeline records what came before it', async ($, on) => {
-  const files: Record<string, string> = { 'C:/Users/me/.claude/cc-meter/plans.json': JSON.stringify({ plans: [], detected: null }) }
+  const files: Record<string, string> = { 'C:/Users/me/.claude/token-almanac/plans.json': JSON.stringify({ plans: [], detected: null }) }
   const key = (path: string) => path.replace(/\\/g, '/')
   let tier = 'default_claude_max_5x'
   const scan = (): GlobalScan => {
-    const plans = (JSON.parse(files['C:/Users/me/.claude/cc-meter/plans.json']!) as { plans: { from: string; plan: string }[] }).plans
+    const plans = (JSON.parse(files['C:/Users/me/.claude/token-almanac/plans.json']!) as { plans: { from: string; plan: string }[] }).plans
     return { rows: [], windows: {}, observations: [], plans, planNow: plans.at(-1)?.plan ?? null, account: { subscriptionType: 'max', rateLimitTier: tier }, today: '2026-10-10', tzOffsetMin: 0, files: 0, readBytes: 0, ms: 1, at: T0 }
   }
   on('clock.now', () => ({ value: T0 }))
@@ -193,7 +193,7 @@ test('a tier change into an empty timeline records what came before it', async (
   await p.press({ key: 'tab-global' })
   tier = 'default_claude_ai'
   await p.press({ key: 'rescan' })
-  const file = JSON.parse(files['C:/Users/me/.claude/cc-meter/plans.json']!) as { plans: { from: string; plan: string; source: string }[] }
+  const file = JSON.parse(files['C:/Users/me/.claude/token-almanac/plans.json']!) as { plans: { from: string; plan: string; source: string }[] }
   expect(file.plans.map(x => [x.from, x.plan, x.source])).toEqual([
     ['2000-01-01', 'max5x', 'auto'],
     ['2026-10-10', 'default_claude_ai', 'auto'],

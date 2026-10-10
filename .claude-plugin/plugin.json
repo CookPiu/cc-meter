@@ -1,13 +1,14 @@
 {
-  "name": "cc-meter",
+  "name": "token-almanac",
+  "displayName": "Token Almanac",
   "version": "0.3.0",
   "description": "Session and machine-wide token usage, plan limit meters with reset countdowns, and an estimate of how long each limit lasts, fitted to your own history.",
   "author": {
     "name": "CookPiu",
     "url": "https://github.com/CookPiu"
   },
-  "homepage": "https://github.com/CookPiu/cc-meter",
-  "repository": "https://github.com/CookPiu/cc-meter",
+  "homepage": "https://github.com/CookPiu/token-almanac",
+  "repository": "https://github.com/CookPiu/token-almanac",
   "license": "MIT",
   "keywords": [
     "usage",

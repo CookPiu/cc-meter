@@ -137,7 +137,7 @@ describe('fit', () => {
 
 test('a tier change the credentials show joins the timeline; the first tier seen does not', async ($, on) => {
   const files: Record<string, string> = {
-    'C:/Users/me/.claude/cc-meter/plans.json': JSON.stringify({ plans: [{ from: '2026-10-07', plan: 'pro', source: 'manual' }], detected: null }),
+    'C:/Users/me/.claude/token-almanac/plans.json': JSON.stringify({ plans: [{ from: '2026-10-07', plan: 'pro', source: 'manual' }], detected: null }),
   }
   let tier = 'default_claude_max_5x'
   const scan = (): GlobalScan => ({
@@ -169,12 +169,12 @@ test('a tier change the credentials show joins the timeline; the first tier seen
     return <Text>engine</Text>
   })
   const pane = {
-    plugin: 'cc-meter',
+    plugin: 'token-almanac',
     component: 'Pane' as const,
-    requestId: 'cc-meter',
+    requestId: 'token-almanac',
     props: { title: 'Token 用量', isFocused: true, bodyColumns: 80, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 80 }, view: {} },
   }
-  const plansFile = () => JSON.parse(files['C:/Users/me/.claude/cc-meter/plans.json']!) as { plans: { plan: string }[]; detected: string }
+  const plansFile = () => JSON.parse(files['C:/Users/me/.claude/token-almanac/plans.json']!) as { plans: { plan: string }[]; detected: string }
 
   // The stale max_5x seen first is only the baseline.
   const p = await $.ui.mount({ ...pane, surface: 'desktop' })
