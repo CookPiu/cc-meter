@@ -64,6 +64,7 @@ test('the pane switches to the global view, scans, and changes range', { options
   const runs: { argv: readonly string[]; stdin?: string }[] = []
   on('clock.now', () => ({ value: NOW }))
   on('clock.every', () => ({ value: { cancel: () => undefined } }) as never)
+  on('clock.sleep', () => ({ value: undefined }) as never)
   const store: Record<string, unknown> = {}
   on('store.get', ($: unknown, e: { key: string }) => ({ value: store[e.key] }) as never)
   on('store.set', ($: unknown, e: { key: string; value: unknown }) => ((store[e.key] = e.value), { value: undefined }) as never)
@@ -99,6 +100,12 @@ test('the pane switches to the global view, scans, and changes range', { options
   const input = JSON.parse(runs[0]?.stdin ?? '{}') as { windows: Record<string, number>; readings: unknown[] }
   expect(input.windows).toEqual({ five_hour: NOW + 3 * HOUR - 5 * HOUR })
   expect(input.readings).toEqual([[NOW, 'five_hour', 40, NOW + 3 * HOUR]])
+  // Reopened within a minute, the view shows what it has and reads nothing again.
+  const again = await $.ui.mount({ ...pane, surface: 'terminal' })
+  await again.press({ key: 'tab-session' })
+  await again.press({ key: 'tab-global' })
+  expect(runs).toHaveLength(1)
+  await again.unmount()
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const p = await $.ui.mount({ ...pane, surface })
@@ -141,6 +148,7 @@ test('the global view leads with what each window holds and has left', { options
   }
   on('clock.now', () => ({ value: NOW }))
   on('clock.every', () => ({ value: { cancel: () => undefined } }) as never)
+  on('clock.sleep', () => ({ value: undefined }) as never)
   const store: Record<string, unknown> = {}
   on('store.get', ($: unknown, e: { key: string }) => ({ value: store[e.key] }) as never)
   on('store.set', ($: unknown, e: { key: string; value: unknown }) => ((store[e.key] = e.value), { value: undefined }) as never)

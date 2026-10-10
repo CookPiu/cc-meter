@@ -87,6 +87,32 @@ export type GlobalScan = {
   at: number
 }
 
+// The machine view over one range: cost per day, project and model, and each local hour's average.
+export type GlobalView = {
+  days: number
+  totalCost: number
+  totalTokens: number
+  daily: { day: string; byModel: Record<string, number> }[]
+  byProject: { project: string; cost: number; tokens: number }[]
+  byModel: { model: string; cost: number; tokens: number }[]
+  hourly: number[]
+  // Per model, per local hour of the day, the average API spend by kind of token.
+  hourlyByModel: Record<string, number[][]>
+  unpriced: string[]
+}
+
+// What the machine view draws, worked out once per scan or pick rather than at each drawing: both
+// ranges, the fits, and the API-equivalent cost of each limit hit under the plan in force now.
+export type Machine = {
+  at: number
+  files: number
+  tzOffsetMin: number
+  windows: GlobalScan['windows']
+  views: { '30d': GlobalView; all: GlobalView }
+  fits: Record<string, Fit>
+  hits: Record<string, number[]>
+}
+
 export type ScanStatus = { state: 'idle' | 'scanning' | 'error'; message?: string }
 
 declare module 'claude-code' {
@@ -101,9 +127,8 @@ declare module 'claude-code' {
       isBandHidden: boolean
       view: 'session' | 'global'
       range: '30d' | 'all'
-      global: GlobalScan | null
+      machine: Machine | null
       scanStatus: ScanStatus
-      fits: Record<string, Fit>
       planChoices: PlanChoice[]
       details: boolean
     }

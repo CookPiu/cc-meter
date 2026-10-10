@@ -33,6 +33,7 @@ function engine(on: any, scan?: () => unknown) {
   const store: Record<string, unknown> = {}
   on('clock.now', () => ({ value: now }))
   on('clock.every', () => ({ value: { cancel: () => undefined } }) as never)
+  on('clock.sleep', () => ({ value: undefined }) as never)
   on('clock.after', () => ({ value: { cancel: () => undefined } }) as never)
   on('store.get', ($: unknown, e: { key: string }) => ({ value: store[e.key] }) as never)
   on('store.set', ($: unknown, e: { key: string; value: unknown }) => ((store[e.key] = e.value), { value: undefined }) as never)

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionUsage } from 'claude-code'
 
-import type { Fit, GlobalScan, InferredPlan, Observation, PlanChoice, Reading, Samples, ScanStatus, Snapshot, Tokens, TurnRow, Vec, Window } from '../types'
+import type { Fit, GlobalScan, GlobalView, InferredPlan, Machine, Observation, PlanChoice, Reading, Samples, ScanStatus, Snapshot, Tokens, TurnRow, Vec, Window } from '../types'
 
 import { MESSAGES, localeOf } from './i18n'
 import type { Locale, Messages } from './i18n'
@@ -33,9 +33,8 @@ const samples = atom({ plugin: 'token-almanac', key: 'samples' } as const, {} as
 const isBandHidden = atom({ plugin: 'token-almanac', key: 'isBandHidden' } as const, false)
 const view = atom({ plugin: 'token-almanac', key: 'view' } as const, 'session' as 'session' | 'global')
 const range = atom({ plugin: 'token-almanac', key: 'range' } as const, '30d' as '30d' | 'all')
-const global = atom({ plugin: 'token-almanac', key: 'global' } as const, null as GlobalScan | null)
+const machine = atom({ plugin: 'token-almanac', key: 'machine' } as const, null as Machine | null)
 const scanStatus = atom({ plugin: 'token-almanac', key: 'scanStatus' } as const, { state: 'idle' } as ScanStatus)
-const fits = atom({ plugin: 'token-almanac', key: 'fits' } as const, {} as Record<string, Fit>)
 const planChoices = atom({ plugin: 'token-almanac', key: 'planChoices' } as const, [] as PlanChoice[])
 const details = atom({ plugin: 'token-almanac', key: 'details' } as const, false)
 
@@ -209,18 +208,6 @@ function dayShift(day: string, delta: number): string {
   return `${t.getUTCFullYear()}-${pad2(t.getUTCMonth() + 1)}-${pad2(t.getUTCDate())}`
 }
 
-export type GlobalView = {
-  days: number
-  totalCost: number
-  totalTokens: number
-  daily: { day: string; byModel: Record<string, number> }[]
-  byProject: { project: string; cost: number; tokens: number }[]
-  byModel: { model: string; cost: number; tokens: number }[]
-  hourly: number[]
-  // Per model, per local hour of the day, the average API spend by kind of token.
-  hourlyByModel: Record<string, number[][]>
-  unpriced: string[]
-}
 
 // The scan over the chosen range: cost per day, project and model, and the average cost of each
 // local hour of the day, the day's shape the forecast walks forward.
@@ -435,8 +422,10 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
   const ROUNDING = 0.006
   const SPREAD = 0.1
 
-  // Residuals and their Jacobian: one row per piece (relative miss), then the start's pulls.
-  const system = (q: number[]) => {
+  // Residuals and their Jacobian: one row per piece (relative miss), then the start's pulls. The
+  // cost of a trial step needs the residuals alone, so the Jacobian is built only when asked for.
+  const NO_J: number[] = []
+  const system = (q: number[], withJ = true) => {
     const { g, f, s } = unpack(q)
     const rows: { r: number; j: number[]; w: number }[] = []
     segs.forEach((sg, i) => {
@@ -445,6 +434,10 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
       const pred = perKind.reduce((acc, x, k) => acc + g[k]! * x, 0)
       // What this piece can be off by, in shares of a window scaled by the plan's multiple.
       const d = Math.hypot(ROUNDING * s[sg.plan]!, SPREAD * target)
+      if (!withJ) {
+        rows.push({ r: (pred - target) / d, j: NO_J, w: base[i]! * robust[i]! })
+        return
+      }
       const j = new Array<number>(n).fill(0)
       perKind.forEach((x, k) => (j[k] = (g[k]! * x) / d))
       others.forEach((m, r) => (j[nG + r] = (f[m]! * (sg.c[m] ?? [0, 0, 0, 0]).reduce((acc, v, k) => acc + g[k]! * v, 0)) / d))
@@ -470,7 +463,7 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
     })
     return rows
   }
-  const cost = (q: number[]) => system(q).reduce((acc, row) => acc + row.w * row.r * row.r, 0)
+  const sumSquares = (rows: { r: number; w: number }[]) => rows.reduce((acc, row) => acc + row.w * row.r * row.r, 0)
 
   let mu = 1e-3
   for (let iter = 0; iter < 200; iter += 1) {
@@ -487,8 +480,7 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
     const step = solve(a, b)
     if (step === null) break
     const next = p.map((v, i) => v + Math.max(-2, Math.min(2, step[i]!)))
-    const before = cost(p)
-    if (cost(next) < before) {
+    if (sumSquares(system(next, false)) < sumSquares(rows)) {
       p = next
       mu = Math.max(1e-9, mu / 3)
       if (Math.max(...step.map(Math.abs)) < 1e-7) break
@@ -498,7 +490,7 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
     }
     // Weigh down the pieces the rest cannot explain, once the fit has had some rounds.
     if (iter === 30 || iter === 60 || iter === 90) {
-      robust = system(p)
+      robust = system(p, false)
         .slice(0, segs.length)
         .map(row => (Math.abs(row.r) <= 2.5 ? 1 : 2.5 / Math.abs(row.r)))
       mu = 1e-3
@@ -869,9 +861,18 @@ async function loadPriceOverrides($: EngineInterface): Promise<void> {
   }
 }
 
-async function scanAll($: EngineInterface): Promise<void> {
-  if ((await read($, scanStatus)).state === 'scanning') return
-  await update($, scanStatus, () => ({ state: 'scanning' as const }))
+// Whether a scan is in flight, so no second one starts beside it; what the last one read, so a pick fits again without reading the transcripts; and the fits of the last
+// observations and picks, kept while neither changes.
+let isScanning = false
+let lastScan: GlobalScan | null = null
+let fitMemo: { key: string; fits: Record<string, Fit> } | null = null
+
+// A scan the user asked for says so while it runs. One in the background (after a turn, on opening
+// the view) keeps the figures shown until the new ones replace them, all in one change.
+async function scanAll($: EngineInterface, isShown = false): Promise<void> {
+  if (isScanning) return
+  isScanning = true
+  if (isShown) await update($, scanStatus, () => ({ state: 'scanning' as const }))
   try {
     const config = await configDir($)
     const snap = await read($, snapshot)
@@ -888,16 +889,51 @@ async function scanAll($: EngineInterface): Promise<void> {
       stdin: JSON.stringify({ windows, readings }),
     })
     if (run.exitCode !== 0) throw new Error(run.stderr.split('\n')[0] || `scanner exited ${run.exitCode}`)
-    const scan = JSON.parse(run.stdout) as GlobalScan
-    await update($, global, () => scan)
+    lastScan = JSON.parse(run.stdout) as GlobalScan
     await refit($)
-    await update($, scanStatus, () => ({ state: 'idle' as const }))
+    if ((await read($, scanStatus)).state !== 'idle') await update($, scanStatus, () => ({ state: 'idle' as const }))
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     // A Node.js that cannot be started is said plainly; the pane words it.
     const isNodeMissing = /ENOENT|not found|cannot find|no such file|spawn/i.test(message)
     await update($, scanStatus, () => ({ state: 'error' as const, message: isNodeMissing ? NODE_MISSING : message }))
+  } finally {
+    isScanning = false
   }
+}
+
+// Works out what the machine view draws from the last scan and the plans picked, and sets it in
+// one change. The fits are the slow part: they are kept while the observations and picks stay the
+// same, and the pane gets a turn between one window kind's and the next.
+async function refit($: EngineInterface): Promise<void> {
+  const scan = lastScan
+  if (scan === null) return
+  const snap = await read($, snapshot)
+  const choices = await read($, planChoices)
+  const kinds = [...new Set([...scan.observations.map(o => o.kind), ...(snap?.windows ?? []).map(w => w.kind)])].sort()
+  const key = JSON.stringify([scan.observations.length, scan.observations.reduce((a, o) => Math.max(a, o.t), 0), choices, kinds])
+  let fits = fitMemo?.key === key ? fitMemo.fits : null
+  if (fits === null) {
+    const fresh: Record<string, Fit> = {}
+    for (const kind of kinds) {
+      await $.clock.sleep(0)
+      fresh[kind] = fitKind(kind, scan.observations, choices)
+    }
+    fits = fresh
+    fitMemo = { key, fits }
+  }
+  await $.clock.sleep(0)
+  const views = { '30d': globalView(scan, '30d'), all: globalView(scan, 'all') }
+  // Each limit hit's API-equivalent cost, for the windows counted under the plan in force now.
+  const hits: Record<string, number[]> = {}
+  for (const o of scan.observations) {
+    const fit = fits[o.kind]
+    if (!o.hit || (fit !== undefined && fit.windowPlans[String(o.resetsAt)] !== fit.latest)) continue
+    const cost = Object.entries(o.byModel).reduce((acc, [m, v]) => acc + costOf(m, v), 0)
+    if (cost > 0) (hits[o.kind] ??= []).push(cost)
+  }
+  const next: Machine = { at: scan.at, files: scan.files, tzOffsetMin: scan.tzOffsetMin, windows: scan.windows, views, fits, hits }
+  await update($, machine, () => next)
 }
 
 // Takes a reading: the snapshot the band and pane draw, and a forecast sample per window,
@@ -923,16 +959,6 @@ async function record($: EngineInterface, u: Pick<SessionUsage, 'context' | 'rat
   if (isGrown) await $.store.set('readings', log.slice(-3000))
 }
 
-// Fits each window kind again, from the last scan and the plans picked.
-async function refit($: EngineInterface): Promise<void> {
-  const scan = await read($, global)
-  if (scan === null) return
-  const snap = await read($, snapshot)
-  const choices = await read($, planChoices)
-  const kinds = new Set([...scan.observations.map(o => o.kind), ...(snap?.windows ?? []).map(w => w.kind)])
-  await update($, fits, () => Object.fromEntries([...kinds].map(k => [k, fitKind(k, scan.observations, choices)])))
-}
-
 // Picks the plan in force from now on. A pick made less than a day ago is taken as a correction of
 // it, keeping its moment; an earlier one stays, so the windows before now keep the plan they had.
 async function pickPlan($: EngineInterface, value: string): Promise<void> {
@@ -945,7 +971,9 @@ async function pickPlan($: EngineInterface, value: string): Promise<void> {
     return list.length === 0 && plan === null ? list : [...list, { at: now, plan }]
   })
   await $.store.set('planChoices', next)
-  await refit($)
+  // A reload forgets the last scan: read the transcripts again for it.
+  if (lastScan === null) await scanAll($)
+  else await refit($)
 }
 
 function ago(ms: number): string {
@@ -1080,9 +1108,13 @@ function pct(part: number, whole: number): string {
 }
 
 // Shows the global view and refreshes its scan.
+// Shows the global view at once with the figures it has, then refreshes them behind it when they
+// are over a minute old; with none yet, it scans in the open.
 async function openGlobal($: EngineInterface): Promise<void> {
   await update($, view, () => 'global' as const)
-  await scanAll($)
+  const shown = await read($, machine)
+  if (shown === null) await scanAll($, true)
+  else if ((await $.clock.now()) - shown.at > MINUTE) await scanAll($)
 }
 
 export const register: Register = (on, options) => {
@@ -1173,9 +1205,11 @@ export const register: Register = (on, options) => {
       bucket = ZERO
       bucketTurns = 0
       await update($, turns, list => [...list, { n: (list[list.length - 1]?.n ?? 0) + 1, at, tokens: withSubagents, subagentTurns }].slice(-60))
-      // The global view reads the transcripts this turn just grew; scan after the turn settles.
+      // The global view reads the transcripts this turn just grew: refresh it after the turn
+      // settles, behind the figures shown, at most twice a minute.
       if ((await read($, view)) === 'global') {
-        $.clock.after(0, () => void scanAll($))
+        const shown = await read($, machine)
+        if (shown === null || at - shown.at > 30_000) $.clock.after(0, () => void scanAll($))
       }
     }
     return next(e)
@@ -1250,15 +1284,15 @@ export const register: Register = (on, options) => {
     const snap = await read($, snapshot)
     const series = await read($, samples)
     const mode = await read($, view)
-    const scan = await read($, global)
-    const fitted = await read($, fits)
+    const scan = await read($, machine)
+    const fitted = scan?.fits ?? {}
     const now = await $.clock.now()
     const { Box, Text, Button } = $.ui.resolve(e)
     const Svg = e.surface === 'terminal' ? undefined : $.ui.resolve(e).Svg
     const lineWidth = Math.max(12, Math.min(32, e.props.bodyColumns - 22))
     const shortModel = (m: string) => m.replace(/^claude-/, '')
     const span = await read($, range)
-    const g = scan === null ? null : globalView(scan, span)
+    const g = scan?.views[span] ?? null
     const kindLabel = (k: number) => t.kinds[TOKEN_KINDS[k]!]
 
     const section = (title: string, aside?: string) => (
@@ -1471,7 +1505,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center">
         <Button key="range-30d" label={t.range30} variant={span === '30d' ? 'primary' : 'secondary'} onPress={() => update($, range, () => '30d' as const)} />
         <Button key="range-all" label={t.rangeAll} variant={span === 'all' ? 'primary' : 'secondary'} onPress={() => update($, range, () => 'all' as const)} />
-        <Button key="rescan" label={t.refresh} dimColor onPress={() => void scanAll($)} />
+        <Button key="rescan" label={t.refresh} dimColor onPress={() => void scanAll($, true)} />
         {status.state === 'error' ? <Text color={RED}>{statusText}</Text> : <Text dimColor>{statusText}</Text>}
       </Box>
     )
@@ -1555,13 +1589,7 @@ export const register: Register = (on, options) => {
         est === null ? '' : w.percentUsed >= 100 ? t.full : est.etaMs !== null ? t.fullIn(fmtDuration(est.etaMs)) : est.atReset !== null ? t.atReset((est.atReset * 100).toFixed(0)) : ''
       return { w, fit, est, outlook }
     })
-    const hits = [...new Set(scan.observations.filter(o => o.hit).map(o => o.kind))].flatMap(kind => {
-      const costs = scan.observations
-        .filter(o => o.hit && o.kind === kind && fitted[kind]?.windowPlans[String(o.resetsAt)] === fitted[kind]?.latest)
-        .map(o => Object.entries(o.byModel).reduce((acc, [m, v]) => acc + costOf(m, v), 0))
-        .filter(c => c > 0)
-      return costs.length === 0 ? [] : [t.hitsLine(windowLabel(kind), costs.length, roughUsd(Math.min(...costs)), roughUsd(Math.max(...costs)))]
-    })
+    const hits = Object.entries(scan.hits).map(([kind, costs]) => t.hitsLine(windowLabel(kind), costs.length, roughUsd(Math.min(...costs)), roughUsd(Math.max(...costs))))
     const cell = (width: number, child: unknown) => <Box width={width}>{child as never}</Box>
     const capacity =
       capacityRows.length === 0 ? null : (
