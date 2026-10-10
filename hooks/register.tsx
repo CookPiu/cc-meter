@@ -873,7 +873,8 @@ let fitMemo: { key: string; fits: Record<string, Fit> } | null = null
 async function scanAll($: EngineInterface, isShown = false): Promise<void> {
   if (isScanning) return
   isScanning = true
-  animate($)
+  // One redraw, so a terminal pane starts its spinner.
+  $.ui.invalidate('ui.render')
   if (isShown) await update($, scanStatus, () => ({ state: 'scanning' as const }))
   try {
     const config = await configDir($)
@@ -988,11 +989,9 @@ function ago(ms: number): string {
 // when a limit runs high.
 const CLAY = '#D97757'
 const CLAY_SOFT = '#E9A88C'
-const SAND = '#D6CCBE'
 const STONE = '#A39E93'
 const AMBER = '#D99A3A'
 const RED = '#C9533E'
-const SERIES = [CLAY, '#B98A6E', STONE, SAND] as const
 
 function levelHex(percent: number): string {
   return percent >= 90 ? RED : percent >= 70 ? AMBER : CLAY
@@ -1031,9 +1030,10 @@ export function positionOf(move: Move, now: number): number {
 const isOnTheWay = (move: Move, now: number) => move.from !== move.to && now - move.at < MOVE_MS
 
 // SMIL that moves one attribute of a shape from where it was to where it is drawn, easing out;
-// nothing when it does not move.
-function glide(attribute: string, move: Move): string {
-  if (move.from === move.to) return ''
+// nothing once the move is over, so a surface that draws the frame afresh (on scroll, on the
+// half-minute redraw) shows the figure where it stands rather than playing the move again.
+function glide(attribute: string, move: Move, now: number): string {
+  if (!isOnTheWay(move, now)) return ''
   return `<animate attributeName="${attribute}" from="${move.from.toFixed(1)}" to="${move.to.toFixed(1)}" dur="${MOVE_MS}ms" calcMode="spline" keyTimes="0;1" keySplines="0.22 1 0.36 1" fill="freeze"/>`
 }
 
@@ -1042,7 +1042,8 @@ const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
 const spinnerAt = (now: number) => SPINNER[Math.floor(now / 80) % SPINNER.length]!
 
 // The terminal is drawn again every frame while a figure there is on its way or a scan runs, and
-// the frames stop when neither is.
+// the frames stop when neither is. Only a terminal drawing starts them: on the other surfaces a
+// redraw every frame would replace the buttons under a press, so a click could be lost.
 let ticker: { cancel: () => void } | null = null
 function animate($: EngineInterface): void {
   if (ticker !== null || !isMotion) return
@@ -1058,120 +1059,369 @@ function animate($: EngineInterface): void {
   })
 }
 
-// A thin rounded meter, its fill gliding from the last value it showed.
-export function meterSvg(percent: number, move: Move | null = null, width = 240): string {
-  const px = (p: number) => (p > 0 ? Math.max(6, Math.max(0, Math.min(1, p / 100)) * width) : 0)
-  const fill = move === null ? null : { from: px(move.from), to: px(move.to), at: move.at }
-  const w = px(percent)
-  return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="6" viewBox="0 0 ${width} 6">` +
-    `<rect width="${width}" height="6" rx="3" fill="${STONE}" fill-opacity="0.22"/>` +
-    (w > 0 || (fill !== null && fill.from > 0) ? `<rect width="${w.toFixed(1)}" height="6" rx="3" fill="${levelHex(percent)}">${fill === null ? '' : glide('width', fill)}</rect>` : '') +
-    `</svg>`
-  )
-}
-
-// A short share bar for a ranked row, sized in pixels so it never runs into the figures beside it.
-function shareSvg(fraction: number, width = 64): string {
-  const w = Math.max(0, Math.min(1, fraction)) * width
-  return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="6" viewBox="0 0 ${width} 6">` +
-    `<rect width="${Math.max(3, w).toFixed(1)}" height="6" rx="3" fill="${CLAY}"/></svg>`
-  )
-}
-
-// One rounded bar split into parts, for what a total is made of.
-function stackSvg(parts: readonly { value: number; color: string; label: string }[], width = 240): string {
-  const total = parts.reduce((a, p) => a + p.value, 0)
-  let x = 0
-  const rects = parts
-    .filter(p => p.value > 0)
-    .map(p => {
-      const w = total > 0 ? (p.value / total) * width : 0
-      const r = `<rect x="${x.toFixed(1)}" width="${w.toFixed(1)}" height="8" fill="${p.color}"><title>${escapeXml(`${p.label} ${((p.value / total) * 100).toFixed(1)}%`)}</title></rect>`
-      x += w
-      return r
-    })
-    .join('')
-  return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="8" viewBox="0 0 ${width} 8">` +
-    `<clipPath id="r"><rect width="${width}" height="8" rx="4"/></clipPath><g clip-path="url(#r)">` +
-    `<rect width="${width}" height="8" fill="${STONE}" fill-opacity="0.22"/>${rects}</g></svg>`
-  )
-}
-
-// Hover lights one bar and dims the rest.
-const HOVER_STYLE = '<style>.b{transition:opacity .15s ease-out}svg:hover .b{opacity:.45}g:hover .b{opacity:1}</style>'
-
-// Small bars over time, each with its own hover text; the last one stands out. With a key, each
-// bar grows from where it stood, by its own id.
-function sparkSvg(items: readonly { value: number; title: string; label?: string; id?: string }[], width = 240, height = 36, key: string | null = null, now = 0): string {
-  const n = items.length
-  const gap = n > 40 ? 1 : 2
-  const barWidth = Math.max(2, (width - gap * (n - 1)) / Math.max(n, 1))
-  const max = Math.max(...items.map(i => i.value), 1e-9)
-  const labelled = items.some(i => i.label)
-  const chart = labelled ? height - 12 : height
-  const bars = items
-    .map((item, i) => {
-      const barH = Math.max(item.value > 0 ? 1.5 : 0, (item.value / max) * chart)
-      const x = i * (barWidth + gap)
-      const fill = i === n - 1 ? CLAY : CLAY_SOFT
-      const label = item.label ? `<text x="${x.toFixed(1)}" y="${height - 1}" font-size="9" fill="${STONE}">${escapeXml(item.label)}</text>` : ''
-      const id = `${key}:${item.id ?? i}`
-      const motion = key === null ? '' : glide('height', moveTo(`${id}:h`, barH, now)) + glide('y', moveTo(`${id}:y`, chart - barH, now, chart))
-      return (
-        `<g><title>${escapeXml(item.title)}</title>` +
-        `<rect x="${x.toFixed(1)}" y="0" width="${barWidth.toFixed(1)}" height="${chart}" fill="transparent"/>` +
-        `<rect class="b" x="${x.toFixed(1)}" y="${(chart - barH).toFixed(1)}" width="${barWidth.toFixed(1)}" height="${barH.toFixed(1)}" rx="1" fill="${fill}">${motion}</rect></g>${label}`
-      )
-    })
-    .join('')
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="system-ui, sans-serif">${HOVER_STYLE}${bars}</svg>`
-}
-
-// Stacked bars of each day's cost by model, the top models apart and the rest as one.
-function dailySvg(daily: GlobalView['daily'], models: readonly string[], width = 240, height = 64, key: string | null = null, now = 0): string {
-  const n = daily.length
-  const gap = n > 40 ? 1 : 2
-  const barWidth = Math.max(1.5, (width - gap * (n - 1)) / Math.max(n, 1))
-  const chart = height - 12
-  const totalOf = (d: GlobalView['daily'][number]) => Object.values(d.byModel).reduce((a, b) => a + b, 0)
-  const max = Math.max(0.01, ...daily.map(totalOf))
-  const every = Math.max(1, Math.ceil(n / 4))
-  const bars = daily
-    .map((d, i) => {
-      const x = i * (barWidth + gap)
-      const parts = models.map(m => d.byModel[m] ?? 0)
-      parts.push(Math.max(0, totalOf(d) - parts.reduce((a, b) => a + b, 0)))
-      let y = chart
-      const rects = parts
-        .map((cost, k) => {
-          const segH = (cost / max) * chart
-          y -= segH
-          if (segH <= 0) return ''
-          const id = `${key}:${d.day}:${k}`
-          const motion = key === null ? '' : glide('height', moveTo(`${id}:h`, segH, now)) + glide('y', moveTo(`${id}:y`, y, now, chart))
-          return `<rect class="b" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${segH.toFixed(1)}" fill="${SERIES[Math.min(k, 3)]}">${motion}</rect>`
-        })
-        .join('')
-      const detail = Object.entries(d.byModel)
-        .filter(([, c]) => c > 0)
-        .sort((a, b) => b[1] - a[1])
-        .map(([m, c]) => `${m.replace(/^claude-/, '')} ${fmtUsd(c)}`)
-        .join(', ')
-      const label = i % every === 0 ? `<text x="${x.toFixed(1)}" y="${height - 1}" font-size="9" fill="${STONE}">${d.day.slice(5)}</text>` : ''
-      return `<g><title>${escapeXml(`${d.day}  ${fmtUsd(totalOf(d))}${detail ? `\n${detail}` : ''}`)}</title><rect x="${x.toFixed(1)}" y="0" width="${barWidth.toFixed(1)}" height="${chart}" fill="transparent"/>${rects}</g>${label}`
-    })
-    .join('')
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="system-ui, sans-serif">${HOVER_STYLE}${bars}</svg>`
-}
-
 // The terminal's sparkline: one block per value, eight heights.
 function sparkText(values: readonly number[]): string {
   const blocks = '▁▂▃▄▅▆▇█'
   const max = Math.max(...values, 1e-9)
   return values.map(v => (v <= 0 ? ' ' : blocks[Math.min(7, Math.floor((v / max) * 7.999))]!)).join('')
+}
+
+// ---- Cards --------------------------------------------------------------------
+
+// The desktop, editor and phone draw the pane's figures as whole images that set their own type
+// and spacing, so the pane reads as a few calm cards rather than rows of text beside small bars.
+// They are images, not frames: nothing reloads when the pane redraws or scrolls.
+const CARD_W = 400
+const FONT = "system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei', sans-serif"
+// Ink, hairlines and the model series by role, light and dark: an image follows the viewer's
+// colour scheme. The series are the first three of a palette checked for colour-blind separation.
+const CARD_STYLE =
+  '<style>' +
+  '.i1{fill:#1f1e1b}.i2{fill:#5e5d59}.i3{fill:#8a8780}.trk{fill:#ebe8e1}.trkS{stroke:#ebe8e1}.hair{stroke:#e6e3dc}.tk{stroke:#5e5d59}' +
+  '.s0{fill:#2a78d6}.s1{fill:#eb6834}.s2{fill:#1baf7a}.s3{fill:#b4b2a9}' +
+  '@media (prefers-color-scheme: dark){' +
+  '.i1{fill:#f4f3ee}.i2{fill:#c3c2b7}.i3{fill:#8f8d86}.trk{fill:#33322e}.trkS{stroke:#33322e}.hair{stroke:#33322e}.tk{stroke:#c3c2b7}' +
+  '.s0{fill:#3987e5}.s1{fill:#d95926}.s2{fill:#199e70}.s3{fill:#6b6a64}}' +
+  '</style>'
+// The models in fixed order: the three largest, then the rest as one.
+const MODEL_SERIES = ['s0', 's1', 's2', 's3'] as const
+
+const END = ' text-anchor="end"'
+const MIDDLE = ' text-anchor="middle"'
+const BOLD = ' font-weight="600"'
+const TABULAR = ' style="font-variant-numeric:tabular-nums"'
+// A colour is a role class or, for the session's token kinds, a fixed hex.
+const paint = (color: string) => (color.startsWith('#') ? `fill="${color}"` : `class="${color}"`)
+
+function card(width: number, height: number, body: string): string {
+  const h = Math.ceil(height)
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${h}" viewBox="0 0 ${width} ${h}" font-family="${FONT}">${CARD_STYLE}${body}</svg>`
+}
+
+function label(x: number, y: number, text: string, cls: string, size: number, extra = ''): string {
+  return `<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" class="${cls}" font-size="${size}"${extra}>${escapeXml(text)}</text>`
+}
+
+// How wide a line sets, roughly: CJK at a full em, capitals a little wider than the rest.
+export function textWidth(text: string, size: number): number {
+  let w = 0
+  for (const ch of text) w += /[⺀-￿]/.test(ch) ? size : /[A-Z@%]/.test(ch) ? size * 0.66 : size * 0.56
+  return w
+}
+
+function clip(text: string, size: number, max: number): string {
+  if (textWidth(text, size) <= max) return text
+  const chars = [...text]
+  while (chars.length > 1 && textWidth(`${chars.join('')}…`, size) > max) chars.pop()
+  return `${chars.join('')}…`
+}
+
+// Gridline values from zero to just past the top, on a 1-2-2.5-5 step, three to five of them.
+export function niceTicks(max: number): number[] {
+  if (!(max > 0)) return [0]
+  const raw = max / 4
+  const pow = 10 ** Math.floor(Math.log10(raw))
+  const step = ([1, 2, 2.5, 5, 10].find(f => f * pow >= raw) ?? 10) * pow
+  const ticks: number[] = []
+  for (let v = 0; v < max + step * 0.999; v += step) ticks.push(Number(v.toPrecision(12)))
+  return ticks
+}
+
+export type LimitCard = {
+  label: string
+  percent: number
+  move: Move | null
+  projected: number | null
+  elapsed: number | null
+  reset: string
+  outlook: string
+  // What the window holds and has left in API dollars, a line each, when there is an estimate.
+  lines: readonly string[]
+}
+
+// The limits side by side, each a ring: the arc is what is used, a paler arc beyond it where the
+// window is headed by its reset, and a tick at how far through the window the clock is, so an arc
+// past its tick is ahead of an even pace. Under each ring, when it resets, how it is going and what
+// it holds. The arc glides while a move is under way.
+export function ringsCard(rows: readonly LimitCard[], keyText: { elapsed: string; projected: string }, now: number, width = CARD_W): string {
+  const R = 40
+  const STROKE = 9
+  const cy = R + STROKE
+  const C = 2 * Math.PI * R
+  const col = width / Math.max(rows.length, 1)
+  const offset = (p: number) => C * (1 - Math.max(0, Math.min(100, p)) / 100)
+  const most = Math.max(0, ...rows.map(r => r.lines.length))
+  const body = rows
+    .map((row, i) => {
+      const cx = col * i + col / 2
+      const color = levelHex(row.percent)
+      const arc = (p: number, extra: string, inner = '') =>
+        `<circle cx="${cx.toFixed(1)}" cy="${cy}" r="${R}" fill="none" stroke-width="${STROKE}" stroke-dasharray="${C.toFixed(2)} ${C.toFixed(2)}" stroke-dashoffset="${offset(p).toFixed(2)}" transform="rotate(-90 ${cx.toFixed(1)} ${cy})"${extra}>${inner}</circle>`
+      const move = row.move !== null && isOnTheWay(row.move, now) ? { from: offset(row.move.from), to: offset(row.percent), at: row.move.at } : null
+      const ahead = row.projected !== null && row.projected > row.percent ? arc(row.projected, ` stroke="${color}" stroke-opacity="0.25"`) : ''
+      const fill = row.percent > 0 || move !== null ? arc(row.percent, ` stroke="${color}" stroke-linecap="round"`, move === null ? '' : glide('stroke-dashoffset', move, now)) : ''
+      let tick = ''
+      if (row.elapsed !== null) {
+        const a = Math.max(0, Math.min(1, row.elapsed)) * 2 * Math.PI - Math.PI / 2
+        const px = (r: number) => (cx + r * Math.cos(a)).toFixed(1)
+        const py = (r: number) => (cy + r * Math.sin(a)).toFixed(1)
+        const [r0, r1] = [R - STROKE / 2 - 3, R + STROKE / 2 + 3]
+        tick = `<line x1="${px(r0)}" y1="${py(r0)}" x2="${px(r1)}" y2="${py(r1)}" class="tk" stroke-width="2" stroke-linecap="round"/>`
+      }
+      const under = [row.reset, row.outlook].filter(Boolean)
+      return (
+        `<circle cx="${cx.toFixed(1)}" cy="${cy}" r="${R}" fill="none" stroke-width="${STROKE}" class="trkS"/>${ahead}${fill}${tick}` +
+        label(cx, cy + 7, `${row.percent}%`, 'i1', 20, MIDDLE + BOLD) +
+        label(cx, cy + R + STROKE + 22, row.label, 'i1', 13, MIDDLE + BOLD) +
+        under.map((text, k) => label(cx, cy + R + STROKE + 42 + k * 18, clip(text, 12, col - 12), k === 0 ? 'i3' : 'i2', 12, MIDDLE)).join('') +
+        row.lines.map((text, k) => label(cx, cy + R + STROKE + 42 + (2 + k) * 18 + 6, clip(text, 12, col - 12), 'i2', 12, MIDDLE + TABULAR)).join('')
+      )
+    })
+    .join('')
+  // A key for the two marks that are not plain data, once, under the rings.
+  const textEnd = cy + R + STROKE + 42 + (most > 0 ? (2 + most) * 18 + 6 : 2 * 18) - 14
+  const keyY = textEnd + 22
+  let key = ''
+  let x = 0
+  if (rows.some(row => row.elapsed !== null)) {
+    key += `<line x1="1" x2="1" y1="${keyY - 9}" y2="${keyY + 1}" class="tk" stroke-width="2" stroke-linecap="round"/>${label(8, keyY, keyText.elapsed, 'i3', 11)}`
+    x = 8 + textWidth(keyText.elapsed, 11) + 18
+  }
+  if (rows.some(row => row.projected !== null && row.projected > row.percent)) {
+    key += `<rect x="${x.toFixed(1)}" y="${keyY - 7}" width="16" height="6" rx="3" fill="${CLAY}" fill-opacity="0.25"/>${label(x + 22, keyY, keyText.projected, 'i3', 11)}`
+  }
+  return card(width, key === '' ? textEnd + 6 : keyY + 4, body + key)
+}
+
+// Headline figures side by side: the value large, what it is beneath.
+export function statsCard(items: readonly [string, string][], width = CARD_W): string {
+  const col = width / Math.max(items.length, 1)
+  return card(width, 46, items.map(([value, name], i) => label(i * col, 20, value, 'i1', 20, BOLD) + label(i * col, 40, clip(name, 12, col - 8), 'i3', 12)).join(''))
+}
+
+export type Column = { id: string; label?: string; parts: { value: number; color: string }[] }
+
+// Columns over time on a few clean gridlines, stacked where a column has parts; the tallest is
+// named over its cap, and a legend follows when there is more than one series. With a key, each
+// part grows from where it stood, by its own id.
+export function columnsCard(
+  cols: readonly Column[],
+  opts: { format: (v: number) => string; legend?: readonly { name: string; color: string }[]; key: string | null; now: number },
+  width = CARD_W,
+): string {
+  const n = cols.length
+  const totals = cols.map(c => c.parts.reduce((a, p) => a + p.value, 0))
+  const ticks = niceTicks(Math.max(0, ...totals))
+  const top = ticks[ticks.length - 1]!
+  const x0 = Math.max(...ticks.map(v => textWidth(opts.format(v), 10))) + 8
+  const plotW = width - x0
+  const y0 = 18
+  const chartH = 104
+  const base = y0 + chartH
+  const slot = plotW / Math.max(n, 1)
+  const barW = Math.min(24, Math.max(1.5, slot - (n > 40 ? 1 : 2)))
+  const yOf = (v: number) => base - (top > 0 ? (v / top) * chartH : 0)
+  let s = ''
+  for (const v of ticks) {
+    const y = yOf(v).toFixed(1)
+    s += `<line x1="${x0}" x2="${width}" y1="${y}" y2="${y}" class="hair" stroke-width="1"/>${label(x0 - 6, Number(y) + 3.5, opts.format(v), 'i3', 10, END + TABULAR)}`
+  }
+  const every = Math.max(1, Math.ceil(n / 4))
+  cols.forEach((c, i) => {
+    const x = x0 + slot * i + (slot - barW) / 2
+    let y = base
+    const shown = c.parts.filter(p => p.value > 0)
+    shown.forEach((p, k) => {
+      // A hairline of the surface between stacked parts, and a rounded cap on the top one.
+      const full = (p.value / (top || 1)) * chartH
+      const segH = Math.max(0, k < shown.length - 1 && full > 2 ? full - 1 : full)
+      y -= full
+      const id = `${opts.key}:${c.id}:${k}`
+      const motion = opts.key === null ? '' : glide('height', moveTo(`${id}:h`, segH, opts.now), opts.now) + glide('y', moveTo(`${id}:y`, y, opts.now, base), opts.now)
+      const rx = k === shown.length - 1 ? ` rx="${Math.min(2, barW / 2)}"` : ''
+      s += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${segH.toFixed(1)}"${rx} ${paint(p.color)}>${motion}</rect>`
+    })
+    if (c.label !== undefined && i % every === 0) {
+      const lx = Math.min(width - 14, Math.max(x0 + 14, x + barW / 2))
+      s += label(lx, base + 14, c.label, 'i3', 10, MIDDLE)
+    }
+  })
+  const peak = totals.indexOf(Math.max(...totals))
+  if (peak >= 0 && totals[peak]! > 0) {
+    const px = Math.min(width - 20, Math.max(x0 + 20, x0 + slot * peak + slot / 2))
+    s += label(px, yOf(totals[peak]!) - 5, opts.format(totals[peak]!), 'i2', 10, MIDDLE + BOLD + TABULAR)
+  }
+  let height = base + (cols.some(c => c.label !== undefined) ? 20 : 6)
+  if (opts.legend !== undefined && opts.legend.length > 1) {
+    const ly = height + 12
+    let x = 0
+    for (const item of opts.legend) {
+      s += `<circle cx="${(x + 4).toFixed(1)}" cy="${ly - 4}" r="4" ${paint(item.color)}/>${label(x + 12, ly, item.name, 'i2', 11)}`
+      x += 12 + textWidth(item.name, 11) + 16
+    }
+    height = ly + 4
+  }
+  return card(width, height, s)
+}
+
+export type ListRow = { name: string; amount: string; share: string; fraction: number; color: string | null }
+
+// Ranked rows: the name, the amount and its share at the right. Rows without a colour of their own
+// carry a thin bar under the name sized to the largest; rows with one are led by a single bar split
+// by share, each row's dot naming its part.
+export function listCard(rows: readonly ListRow[], width = CARD_W, stack: readonly { value: number; color: string }[] | null = null): string {
+  let s = ''
+  let y = 0
+  if (stack !== null) {
+    const total = stack.reduce((a, p) => a + p.value, 0)
+    const parts = stack.filter(p => p.value > 0)
+    const room = width - 2 * Math.max(0, parts.length - 1)
+    let x = 0
+    s += `<clipPath id="stack"><rect width="${width}" height="10" rx="5"/></clipPath><g clip-path="url(#stack)"><rect width="${width}" height="10" class="trk"/>`
+    for (const p of parts) {
+      const w = total > 0 ? (p.value / total) * room : 0
+      s += `<rect x="${x.toFixed(1)}" width="${w.toFixed(1)}" height="10" ${paint(p.color)}/>`
+      x += w + 2
+    }
+    s += '</g>'
+    y = 24
+  }
+  const amountX = width - 52
+  const rowH = stack === null ? 32 : 24
+  for (const row of rows) {
+    const nx = row.color === null ? 0 : 14
+    if (row.color !== null) s += `<circle cx="4" cy="${y + 9}" r="4" ${paint(row.color)}/>`
+    s += label(nx, y + 13, clip(row.name, 13, amountX - nx - 72), 'i1', 13)
+    s += label(amountX, y + 13, row.amount, 'i1', 13, END + TABULAR)
+    s += label(width, y + 13, row.share, 'i3', 12, END + TABULAR)
+    if (row.color === null) {
+      const room = amountX - 72
+      s += `<rect y="${y + 20}" width="${room}" height="4" rx="2" class="trk"/><rect y="${y + 20}" width="${Math.max(4, row.fraction * room).toFixed(1)}" height="4" rx="2" fill="${CLAY}"/>`
+    }
+    y += rowH
+  }
+  return card(width, y - (stack === null ? 4 : 6), s)
+}
+
+// How sure a fit is, as three dots filled one per step and its word after them, right-aligned at x.
+function confidenceMark(x: number, y: number, level: Fit['confidence'], word: string): string {
+  const filled = { none: 0, low: 1, medium: 2, high: 3 }[level]
+  const textW = textWidth(word, 12)
+  const dots = [0, 1, 2]
+    .map(i => `<circle cx="${(x - textW - 8 - (2 - i) * 11 - 4).toFixed(1)}" cy="${y - 4}" r="3.5" ${i < filled ? `fill="${CLAY}"` : 'class="trk"'}/>`)
+    .join('')
+  return dots + label(x, y, word, 'i2', 12, END)
+}
+
+export type CapacityRow = {
+  label: string
+  percent: number
+  whole: string
+  left: string
+  outlook: string
+  confidence: Fit['confidence']
+  confidenceWord: string
+  // Each past limit hit's API-equivalent dollars, and the line that says so.
+  hits: readonly number[]
+  hitsLine: string
+}
+
+// What each window holds: a bar for the whole window, filled to the share used, the dollars it
+// holds and has left under it, and how sure the estimate is. Past limit hits sit on a dollar
+// scale beneath, a dot each, so their spread shows at a glance.
+export function capacityCard(rows: readonly CapacityRow[], width = CARD_W): string {
+  let s = ''
+  let y = 0
+  for (const row of rows) {
+    s += label(0, y + 14, row.label, 'i1', 13, BOLD) + confidenceMark(width, y + 14, row.confidence, row.confidenceWord)
+    const used = Math.max(0, Math.min(100, row.percent))
+    s += `<rect y="${y + 24}" width="${width}" height="10" rx="5" class="trk"/>`
+    if (used > 0) s += `<rect y="${y + 24}" width="${Math.max(10, (used / 100) * width).toFixed(1)}" height="10" rx="5" fill="${levelHex(row.percent)}"/>`
+    s += label(0, y + 52, `${row.whole} · ${row.left}`, 'i2', 12, TABULAR)
+    if (row.outlook) s += label(width, y + 52, row.outlook, 'i2', 12, END)
+    y += 62
+    if (row.hits.length > 0) {
+      s += label(0, y + 12, row.hitsLine, 'i3', 11)
+      const lo = Math.min(...row.hits)
+      const hi = Math.max(...row.hits)
+      const pad = Math.max((hi - lo) * 0.15, hi * 0.05, 1)
+      const [a, b] = [Math.max(0, lo - pad), hi + pad]
+      const x0 = 34
+      const x1 = width - 34
+      const xOf = (v: number) => x0 + ((v - a) / (b - a || 1)) * (x1 - x0)
+      const ay = y + 30
+      s += `<line x1="${x0}" x2="${x1}" y1="${ay}" y2="${ay}" class="hair" stroke-width="1"/>`
+      s += label(x0 - 6, ay + 4, `$${Math.round(a)}`, 'i3', 10, END + TABULAR) + label(x1 + 6, ay + 4, `$${Math.round(b)}`, 'i3', 10, TABULAR)
+      for (const v of row.hits) s += `<circle cx="${xOf(v).toFixed(1)}" cy="${ay}" r="4.5" fill="${CLAY}" fill-opacity="0.55"/>`
+      y += 44
+    }
+    y += 16
+  }
+  return card(width, y - 16, s)
+}
+
+export type FitCard = {
+  label: string
+  confidence: Fit['confidence']
+  confidenceWord: string
+  // What it learned from and how far it misses, one line.
+  head: string
+  kindsTitle: string
+  // Each kind's weight against output's, with its 95% band; unclear when the band is too wide to say.
+  kinds: readonly { name: string; value: number; band: [number, number] | null }[]
+  reference: string
+  modelsTitle: string | null
+  models: readonly { name: string; value: number; color: string }[]
+  unclear: string
+}
+
+// A fit as an interval plot on one logarithmic scale from ×0.01 to ×10: each kind's weight per API
+// dollar against output's (the line at ×1), its 95% band as a bar, a pale band across the scale
+// where the pieces cannot tell; then each model against the reference model on the same scale.
+export function fitCard(fit: FitCard, width = CARD_W): string {
+  const x0 = 92
+  const x1 = width - 70
+  const [lo, hi] = [-2, 1]
+  const xOf = (v: number) => x0 + ((Math.log10(Math.max(10 ** lo, Math.min(10 ** hi, v))) - lo) / (hi - lo)) * (x1 - x0)
+  const times = (v: number) => `×${v >= 10 ? v.toFixed(0) : v >= 1 ? v.toFixed(1) : v.toFixed(2)}`
+  let s = label(0, 14, fit.label, 'i1', 13, BOLD) + confidenceMark(width, 14, fit.confidence, fit.confidenceWord)
+  s += label(0, 34, fit.head, 'i3', 11)
+  let y = 50
+  const scale = (top: number, bottom: number) => {
+    let g = ''
+    for (let e = lo; e <= hi; e += 1) {
+      const x = xOf(10 ** e).toFixed(1)
+      g += `<line x1="${x}" x2="${x}" y1="${top}" y2="${bottom}" class="${e === 0 ? 'tk' : 'hair'}" stroke-width="1"/>`
+      g += label(Number(x), bottom + 12, `×${Number((10 ** e).toPrecision(1))}`, 'i3', 10, MIDDLE + TABULAR)
+    }
+    return g
+  }
+  const rows = (items: readonly { name: string; value: number; band: [number, number] | null; color: string }[], title: string) => {
+    let g = label(0, y + 12, title, 'i2', 12)
+    const top = y + 20
+    items.forEach((item, i) => {
+      const cy = top + 10 + i * 22
+      g += label(0, cy + 4, clip(item.name, 12, x0 - 10), 'i1', 12)
+      if (item.band === null) {
+        g += `<rect x="${x0}" y="${cy - 4}" width="${x1 - x0}" height="8" rx="4" fill="${CLAY}" fill-opacity="0.12"/>`
+        g += `<circle cx="${xOf(item.value).toFixed(1)}" cy="${cy}" r="4" fill="none" stroke="${CLAY}" stroke-width="1.5"/>`
+        g += label(width, cy + 4, `${times(item.value)} ${fit.unclear}`, 'i3', 12, END + TABULAR)
+      } else {
+        const [a, b] = item.band
+        if (b > a) g += `<line x1="${xOf(a).toFixed(1)}" x2="${xOf(b).toFixed(1)}" y1="${cy}" y2="${cy}" stroke="${CLAY}" stroke-opacity="0.45" stroke-width="4" stroke-linecap="round"/>`
+        g += `<circle cx="${xOf(item.value).toFixed(1)}" cy="${cy}" r="4.5" ${paint(item.color)}/>`
+        g += label(width, cy + 4, times(item.value), 'i1', 12, END + TABULAR)
+      }
+    })
+    const bottom = top + items.length * 22 + 2
+    g = scale(top, bottom) + g
+    y = bottom + 24
+    return g
+  }
+  // The kinds, then output itself at ×1, the mark the others are read against.
+  s += rows([...fit.kinds.map(k => ({ ...k, color: CLAY })), { name: fit.reference, value: 1, band: [1, 1], color: STONE }], fit.kindsTitle)
+  if (fit.modelsTitle !== null && fit.models.length > 0) s += rows(fit.models.map(m => ({ ...m, band: [m.value, m.value] as [number, number] })), fit.modelsTitle)
+  return card(width, y - 8, s)
 }
 
 function pct(part: number, whole: number): string {
@@ -1182,12 +1432,13 @@ function pct(part: number, whole: number): string {
 
 // Shows the global view and refreshes its scan.
 // Shows the global view at once with the figures it has, then refreshes them behind it when they
-// are over a minute old; with none yet, it scans in the open.
+// are over a minute old, without holding the press that opened it; with none yet, it scans in the
+// open.
 async function openGlobal($: EngineInterface): Promise<void> {
   await update($, view, () => 'global' as const)
   const shown = await read($, machine)
   if (shown === null) await scanAll($, true)
-  else if ((await $.clock.now()) - shown.at > MINUTE) await scanAll($)
+  else if ((await $.clock.now()) - shown.at > MINUTE) $.clock.after(0, () => void scanAll($))
 }
 
 export const register: Register = (on, options) => {
@@ -1309,26 +1560,24 @@ export const register: Register = (on, options) => {
     return { text: opened.isPlaced ? t.paneOpened : t.paneWaiting }
   })
 
-  // The one-line summary above the prompt.
+  // The one-line summary above the prompt, kept short: the session's cost and context, each
+  // limit's percent, and when a limit will fill before it resets, how soon. The rest is in the pane.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || (await read($, isBandHidden))) {
       return next(e)
     }
     const snap = await read($, snapshot)
-    const spent = await read($, totals)
     const series = await read($, samples)
     const now = await $.clock.now()
     const { Box, Text, Button } = $.ui.resolve(e)
 
     return (
       <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center">
-        <Text color="claude" bold>
-          ◆ Token
-        </Text>
         <Text>
-          {t.bandSession} {snap?.costUsd !== undefined ? `${fmtUsd(snap.costUsd)} · ` : ''}
-          {fmtTokens(sum(spent))} tok
-          {snap?.contextPercent !== undefined ? ` · ${t.bandContext(snap.contextPercent)}` : ''}
+          <Text color="claude" bold>
+            ◆{' '}
+          </Text>
+          {[snap?.costUsd !== undefined ? fmtUsd(snap.costUsd) : '', snap?.contextPercent !== undefined ? t.bandContext(snap.contextPercent) : ''].filter(Boolean).join(' · ')}
         </Text>
         {(snap?.windows ?? []).map(w => {
           const f = forecast(series[w.kind]?.points ?? [], w.percentUsed, now, w.resetsAt)
@@ -1339,10 +1588,7 @@ export const register: Register = (on, options) => {
               <Text color={levelColor(w.percentUsed)} bold>
                 {w.percentUsed}%
               </Text>
-              <Text dimColor>
-                {' '}
-                {[resetText(w.resetsAt, now), f.etaMs !== null ? t.fullIn(fmtDuration(f.etaMs)) : ''].filter(Boolean).join(' · ')}
-              </Text>
+              {f.etaMs !== null && <Text dimColor> {t.bandFull(fmtDuration(f.etaMs))}</Text>}
             </Text>
           )
         })}
@@ -1376,7 +1622,10 @@ export const register: Register = (on, options) => {
       </Box>
     )
     // Figures side by side: the value, and what it is under it.
-    const stats = (items: readonly [string, string][]) => (
+    const stats = (items: readonly [string, string][]) =>
+      Svg !== undefined ? (
+        <Svg source={statsCard(items)} alt={items.map(([value, name]) => `${name} ${value}`).join(', ')} />
+      ) : (
       <Box flexDirection="row" flexWrap="wrap" columnGap={4}>
         {items.map(([value, label]) => (
           <Box flexDirection="column">
@@ -1386,11 +1635,8 @@ export const register: Register = (on, options) => {
         ))}
       </Box>
     )
-    // A meter glides to a new value: SMIL in a vector drawing, frame by frame in the terminal.
+    // The terminal's meter, drawn frame by frame while it glides to a new value.
     const meter = (key: string, percent: number) => {
-      if (Svg !== undefined) {
-        return <Svg source={meterSvg(percent, moveTo(`g:meter:${key}`, percent, now))} alt={`${percent}%`} isInteractive={isMotion ? true : undefined} />
-      }
       const move = moveTo(`t:meter:${key}`, percent, now)
       if (isOnTheWay(move, now)) animate($)
       const filled = Math.round((Math.min(100, positionOf(move, now)) / 100) * lineWidth)
@@ -1401,9 +1647,16 @@ export const register: Register = (on, options) => {
         </Text>
       )
     }
-    // Rows of names with a share bar, an amount and a share, the largest first.
-    const ranked = (items: readonly { name: string; value: number; amount: string }[], total: number) => {
+    // Rows of names with a share bar, an amount and a share, the largest first. Given colours, the
+    // rows are parts of one whole, led by a bar split by share.
+    const ranked = (items: readonly { name: string; value: number; amount: string; color?: string }[], total: number) => {
       const max = Math.max(...items.map(i => i.value), 1e-9)
+      if (Svg !== undefined) {
+        const isParts = items.some(i => i.color !== undefined)
+        const rows = items.map(i => ({ name: i.name, amount: i.amount, share: pct(i.value, total), fraction: i.value / max, color: i.color ?? null }))
+        const stack = isParts ? items.map(i => ({ value: i.value, color: i.color ?? MODEL_SERIES[3] })) : null
+        return <Svg source={listCard(rows, CARD_W, stack)} alt={items.map(i => `${i.name} ${i.amount} ${pct(i.value, total)}`).join(', ')} />
+      }
       return (
         <Box flexDirection="column">
           {items.map(item => (
@@ -1412,11 +1665,7 @@ export const register: Register = (on, options) => {
                 <Text wrap="truncate-end">{item.name}</Text>
               </Box>
               <Box width={10}>
-                {Svg !== undefined ? (
-                  <Svg source={shareSvg(item.value / max)} alt={pct(item.value, total)} />
-                ) : (
-                  <Text color={CLAY}>{'▬'.repeat(Math.max(1, Math.round((item.value / max) * 8)))}</Text>
-                )}
+                <Text color={CLAY}>{'▬'.repeat(Math.max(1, Math.round((item.value / max) * 8)))}</Text>
               </Box>
               <Box width={9}>
                 <Text>{item.amount}</Text>
@@ -1437,22 +1686,56 @@ export const register: Register = (on, options) => {
 
     // The limits: each one's meter, and one line on when it resets and how it is going. The most
     // trusted outlook wins: the fit where it has enough to go on, else the last 90 minutes' pace.
-    const outlookOf = (w: Window) => {
+    // Where the window is headed by its reset, in percent, when the outlook says.
+    const outlookOf = (w: Window): { text: string; projected: number | null } => {
       const fit = fitted[w.kind]
       const est = scan !== null && g !== null ? fittedWindow(w, fit, fit?.latest ?? null, scan.windows[w.kind]?.byModel, g.hourlyByModel, scan.tzOffsetMin, now) : null
       if (est !== null && fit !== undefined && fit.confidence !== 'low') {
-        return est.etaMs !== null ? t.fullIn(fmtDuration(est.etaMs)) : est.atReset !== null ? t.atReset((est.atReset * 100).toFixed(0)) : ''
+        if (est.etaMs !== null) return { text: t.fullIn(fmtDuration(est.etaMs)), projected: 100 }
+        return est.atReset !== null ? { text: t.atReset((est.atReset * 100).toFixed(0)), projected: est.atReset * 100 } : { text: '', projected: null }
       }
       const f = forecast(series[w.kind]?.points ?? [], w.percentUsed, now, w.resetsAt)
-      return { eta: f.etaMs !== null ? t.fullIn(fmtDuration(f.etaMs)) : '', full: t.full, flat: t.flat, safe: t.safe, unknown: '' }[f.state]
+      const hoursLeft = (Date.parse(w.resetsAt ?? '') - now) / HOUR
+      const projected =
+        f.state === 'eta' || f.state === 'full'
+          ? 100
+          : f.state === 'safe' && f.ratePerHour !== null && Number.isFinite(hoursLeft)
+            ? Math.min(100, w.percentUsed + f.ratePerHour * hoursLeft)
+            : null
+      return { text: { eta: f.etaMs !== null ? t.fullIn(fmtDuration(f.etaMs)) : '', full: t.full, flat: t.flat, safe: t.safe, unknown: '' }[f.state], projected }
     }
     const limits =
       (snap?.windows.length ?? 0) === 0 ? (
         <Text dimColor>{hasNoLimits(snap) ? t.noLimits : t.waitingLimits}</Text>
+      ) : Svg !== undefined ? (
+        <Svg
+          source={ringsCard(
+            (snap?.windows ?? []).map(w => {
+              const length = windowLength(w.kind)
+              const reset = Date.parse(w.resetsAt ?? '')
+              const outlook = outlookOf(w)
+              const fit = fitted[w.kind]
+              const est = scan !== null && g !== null ? fittedWindow(w, fit, fit?.latest ?? null, scan.windows[w.kind]?.byModel, g.hourlyByModel, scan.tzOffsetMin, now) : null
+              return {
+                lines: est === null ? [] : [`${t.colWhole} ≈ ${roughUsd(est.capacityUsd)}`, `${t.colLeft} ≈ ${roughUsd(est.remainingUsd)}`],
+                label: windowLabel(w.kind),
+                percent: w.percentUsed,
+                move: moveTo(`g:meter:${w.kind}`, w.percentUsed, now),
+                projected: outlook.projected,
+                elapsed: length === null || Number.isNaN(reset) ? null : Math.max(0, Math.min(1, 1 - (reset - now) / length)),
+                reset: resetText(w.resetsAt, now),
+                outlook: outlook.text,
+              }
+            }),
+            { elapsed: t.keyElapsed, projected: t.keyProjected },
+            now,
+          )}
+          alt={(snap?.windows ?? []).map(w => `${windowLabel(w.kind)} ${w.percentUsed}% ${[resetText(w.resetsAt, now), outlookOf(w).text].filter(Boolean).join(' · ')}`).join('; ')}
+        />
       ) : (
         <Box flexDirection="column" rowGap={1}>
           {(snap?.windows ?? []).map(w => {
-            const detail = [resetText(w.resetsAt, now), outlookOf(w)].filter(Boolean).join(' · ')
+            const detail = [resetText(w.resetsAt, now), outlookOf(w).text].filter(Boolean).join(' · ')
             return (
               <Box flexDirection="column">
                 <Box flexDirection="row" columnGap={2} alignItems="center">
@@ -1504,27 +1787,27 @@ export const register: Register = (on, options) => {
         .map(([m, x]) => ({ name: shortModel(m), value: sum(x), amount: fmtTokens(sum(x)) }))
         .sort((a, b) => b.value - a.value)
 
-      return (
-        <Box flexDirection="column" rowGap={1}>
-          {tabs}
-          {limits}
-          {stats([
-            [snap?.costUsd !== undefined ? fmtUsd(snap.costUsd) : '–', t.statCost],
-            [fmtTokens(total), t.statTokens],
-            [snap?.contextPercent !== undefined ? `${snap.contextPercent}%` : '–', t.statContext(fmtTokens(snap?.contextWindow ?? 0))],
-            [String(rows.length), t.statTurns],
-          ])}
+      const figures = stats([
+        [snap?.costUsd !== undefined ? fmtUsd(snap.costUsd) : '–', t.statCost],
+        [fmtTokens(total), t.statTokens],
+        [snap?.contextPercent !== undefined ? `${snap.contextPercent}%` : '–', t.statContext(fmtTokens(snap?.contextWindow ?? 0))],
+        [String(rows.length), t.statTurns],
+      ])
+      const composition = (
           <Box flexDirection="column">
             {section(t.composition, t.byCost)}
             {Svg !== undefined ? (
-              <Svg source={stackSvg(kinds)} alt={kinds.map(k => `${k.label} ${pct(k.value, spentTotal)}`).join(', ')} isInteractive />
+              ranked(
+                kinds.map(k => ({ name: k.label, value: k.value, amount: fmtUsd(k.value), color: k.color })),
+                spentTotal,
+              )
             ) : (
+              <Box flexDirection="column">
               <Text>
                 {kinds.map(k => (
                   <Text color={k.color}>{'█'.repeat(spentTotal > 0 ? Math.round((k.value / spentTotal) * lineWidth) : 0)}</Text>
                 ))}
               </Text>
-            )}
             <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
               {kinds.map(k => (
                 <Text>
@@ -1536,38 +1819,69 @@ export const register: Register = (on, options) => {
                 </Text>
               ))}
             </Box>
+              </Box>
+            )}
           </Box>
+      )
+      const perTurn = (
           <Box flexDirection="column">
             {section(t.perTurn, recent.length > 0 && peak !== null ? t.perTurnAside(recent.length, peak.n, fmtTokens(sum(peak.tokens))) : undefined)}
             {recent.length === 0 ? (
               <Text dimColor>{t.noTurns}</Text>
             ) : Svg !== undefined ? (
               <Svg
-                source={sparkSvg(
-                  recent.map(r => ({
-                    value: sum(r.tokens),
-                    title: t.turnTitle(r.n, fmtTokens(sum(r.tokens)), fmtTokens(r.tokens.output), fmtTokens(r.tokens.cacheWrite), fmtTokens(r.tokens.cacheRead), r.subagentTurns),
+                source={columnsCard(
+                  recent.map((r, i) => ({
                     id: String(r.n),
+                    label: `#${r.n}`,
+                    parts: [{ value: sum(r.tokens), color: i === recent.length - 1 ? CLAY : CLAY_SOFT }],
                   })),
-                  240,
-                  36,
-                  isMotion ? 'g:turns' : null,
-                  now,
+                  { format: fmtTokens, key: isMotion ? 'g:turns' : null, now },
                 )}
-                alt={recent.map(r => t.turnAlt(r.n, fmtTokens(sum(r.tokens)))).join(', ')}
-                isInteractive
+                alt={recent.map(r => t.turnTitle(r.n, fmtTokens(sum(r.tokens)), fmtTokens(r.tokens.output), fmtTokens(r.tokens.cacheWrite), fmtTokens(r.tokens.cacheRead), r.subagentTurns)).join('; ')}
               />
             ) : (
               <Text color={CLAY}>{sparkText(recent.map(r => sum(r.tokens)))}</Text>
             )}
           </Box>
-          {modelRows.length > 1 && (
+      )
+      const modelsBlock = modelRows.length > 1 && (
             <Box flexDirection="column">
               {section(t.models)}
               {ranked(modelRows, total)}
             </Box>
-          )}
-          <Text dimColor>{t.sessionNote(fmtDuration(now - from))}</Text>
+      )
+      const note = <Text dimColor>{t.sessionNote(fmtDuration(now - from))}</Text>
+
+      // The drawing surfaces lead with the limits, the session's figures and its turns, roomily;
+      // what the session is made of and by which models open on asking.
+      if (Svg !== undefined) {
+        const isOpen = await read($, details)
+        return (
+          <Box flexDirection="column" rowGap={2}>
+            {tabs}
+            {limits}
+            {figures}
+            {perTurn}
+            <Box flexDirection="column" rowGap={2}>
+              <Button key="details" label={isOpen ? t.showLess : t.showMore} plain dimColor onPress={() => update($, details, open => !open)} />
+              {isOpen && composition}
+              {isOpen && modelsBlock}
+              {isOpen && note}
+            </Box>
+            {close}
+          </Box>
+        )
+      }
+      return (
+        <Box flexDirection="column" rowGap={1}>
+          {tabs}
+          {limits}
+          {figures}
+          {composition}
+          {perTurn}
+          {modelsBlock}
+          {note}
           {close}
         </Box>
       )
@@ -1577,7 +1891,8 @@ export const register: Register = (on, options) => {
     const status = await read($, scanStatus)
     const isOpen = await read($, details)
     // A scan in flight turns a spinner after the status, the line's end, so nothing else moves.
-    const spinner = isScanning ? ` ${spinnerAt(now)}` : ''
+    const spinner = isScanning && e.surface === 'terminal' ? ` ${spinnerAt(now)}` : ''
+    if (spinner !== '') animate($)
     const statusText =
       status.state === 'scanning'
         ? t.scanning
@@ -1677,41 +1992,43 @@ export const register: Register = (on, options) => {
       return { w, fit, est, outlook }
     })
     const hits = Object.entries(scan.hits).map(([kind, costs]) => t.hitsLine(windowLabel(kind), costs.length, roughUsd(Math.min(...costs)), roughUsd(Math.max(...costs))))
-    const cell = (width: number, child: unknown) => <Box width={width}>{child as never}</Box>
+    // The table is laid out by columns, each heading over its own values: a row of fixed-width cells
+    // drifts out of line on the desktop, where each row's cells are sized by their own text.
+    const column = (heading: string, values: unknown[]) => (
+      <Box flexDirection="column">
+        <Text dimColor>{heading === '' ? ' ' : heading}</Text>
+        {values as never}
+      </Box>
+    )
+    const picker =
+      Form === null ? null : (
+        <Form.Select
+          key="plan"
+          label={t.planPick}
+          value={pickNow ?? UNKNOWN}
+          options={[UNKNOWN, ...PLAN_CHOICES].map(value => ({ value, label: value === UNKNOWN ? t.planUnknown : planLabel(value) }))}
+          onSelect={value => void pickPlan($, value)}
+        />
+      )
+    // The terminal's estimates: a table under the plan picker.
     const capacity =
       capacityRows.length === 0 ? null : (
         <Box flexDirection="column">
           {section(t.capacity, t.capacityAside(pickNow === null ? t.planUnknown : planLabel(pickNow)))}
-          {Form !== null && (
-            <Form.Select
-              key="plan"
-              label={t.planPick}
-              value={pickNow ?? UNKNOWN}
-              options={[UNKNOWN, ...PLAN_CHOICES].map(value => ({ value, label: value === UNKNOWN ? t.planUnknown : planLabel(value) }))}
-              onSelect={value => void pickPlan($, value)}
-            />
-          )}
+          {picker}
           {pickNow === null && <Text dimColor>{t.planHint}</Text>}
           {capacityRows.every(r => r.est === null) ? (
             <Text dimColor>{t.capacityNone}</Text>
           ) : (
-            <Box flexDirection="column">
-              <Box flexDirection="row" columnGap={2}>
-                {cell(11, <Text> </Text>)}
-                {cell(8, <Text dimColor>{t.colWhole}</Text>)}
-                {cell(8, <Text dimColor>{t.colLeft}</Text>)}
-                {cell(17, <Text dimColor>{t.colOutlook}</Text>)}
-                <Text dimColor>{t.colConfidence}</Text>
-              </Box>
-              {capacityRows.map(({ w, fit, est, outlook }) => (
-                <Box flexDirection="row" columnGap={2}>
-                  {cell(11, <Text>{windowLabel(w.kind)}</Text>)}
-                  {cell(8, <Text bold>{est !== null ? `≈ ${roughUsd(est.capacityUsd)}` : '–'}</Text>)}
-                  {cell(8, <Text color={est !== null && w.percentUsed >= 70 ? levelHex(w.percentUsed) : undefined}>{est !== null ? `≈ ${roughUsd(est.remainingUsd)}` : '–'}</Text>)}
-                  {cell(17, <Text>{outlook || '–'}</Text>)}
-                  <Text dimColor>{t.confidence[fit?.confidence ?? 'none']}</Text>
-                </Box>
-              ))}
+            <Box flexDirection="row" columnGap={3}>
+              {column('', capacityRows.map(({ w }) => <Text>{windowLabel(w.kind)}</Text>))}
+              {column(t.colWhole, capacityRows.map(({ est }) => <Text bold>{est !== null ? `≈ ${roughUsd(est.capacityUsd)}` : '–'}</Text>))}
+              {column(
+                t.colLeft,
+                capacityRows.map(({ w, est }) => <Text color={est !== null && w.percentUsed >= 70 ? levelHex(w.percentUsed) : undefined}>{est !== null ? `≈ ${roughUsd(est.remainingUsd)}` : '–'}</Text>),
+              )}
+              {column(t.colOutlook, capacityRows.map(({ outlook }) => <Text>{outlook || '–'}</Text>))}
+              {column(t.colConfidence, capacityRows.map(({ fit }) => <Text dimColor>{t.confidence[fit?.confidence ?? 'none']}</Text>))}
             </Box>
           )}
           {hits.map(line => (
@@ -1720,24 +2037,28 @@ export const register: Register = (on, options) => {
         </Box>
       )
 
-    return (
-      <Box flexDirection="column" rowGap={1}>
-        {tabs}
-        {limits}
-        {capacity}
-        {controls}
-        {stats([
-          [fmtUsd(g.totalCost), span === '30d' ? t.statRange30 : t.statRangeAll],
-          [fmtUsd(g.days > 0 ? g.totalCost / g.days : 0), t.statPerDay],
-          [fmtTokens(g.totalTokens), t.statTokens],
-          [t.days(g.days), t.statSpan],
-        ])}
+    const daily = (
         <Box flexDirection="column">
-          {section(t.daily, g.daily.length > 0 ? t.peak(fmtUsd(Math.max(...g.daily.map(d => Object.values(d.byModel).reduce((a, b) => a + b, 0))))) : undefined)}
+          {section(t.daily, Svg === undefined && g.daily.length > 0 ? t.peak(fmtUsd(Math.max(...g.daily.map(d => Object.values(d.byModel).reduce((a, b) => a + b, 0))))) : undefined)}
           {g.daily.length === 0 ? (
             <Text dimColor>{t.noUsage}</Text>
           ) : Svg !== undefined ? (
-            <Svg source={dailySvg(g.daily, top, 240, 64, isMotion ? `g:daily:${span}` : null, now)} alt={g.daily.map(d => `${d.day} ${fmtUsd(Object.values(d.byModel).reduce((a, b) => a + b, 0))}`).join(', ')} isInteractive />
+            <Svg
+              source={columnsCard(
+                g.daily.map(d => {
+                  const parts = top.map(m => d.byModel[m] ?? 0)
+                  const rest = Math.max(0, Object.values(d.byModel).reduce((a, b) => a + b, 0) - parts.reduce((a, b) => a + b, 0))
+                  return { id: d.day, label: d.day.slice(5), parts: [...parts, rest].map((value, k) => ({ value, color: MODEL_SERIES[Math.min(k, 3)]! })) }
+                }),
+                {
+                  format: v => (v >= 1000 ? `$${(v / 1000).toFixed(v % 1000 === 0 ? 0 : 1)}k` : `$${Number(v.toPrecision(3))}`),
+                  legend: [...top.map(shortModel), t.other].map((name, k) => ({ name, color: MODEL_SERIES[Math.min(k, 3)]! })),
+                  key: isMotion ? `g:daily:${span}` : null,
+                  now,
+                },
+              )}
+              alt={g.daily.map(d => `${d.day} ${fmtUsd(Object.values(d.byModel).reduce((a, b) => a + b, 0))}`).join(', ')}
+            />
           ) : (
             <Box flexDirection="column">
               <Text color={CLAY}>{sparkText(g.daily.slice(-lineWidth * 2).map(d => Object.values(d.byModel).reduce((a, b) => a + b, 0)))}</Text>
@@ -1746,17 +2067,23 @@ export const register: Register = (on, options) => {
               </Text>
             </Box>
           )}
-          {Svg !== undefined && (
-            <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-              {[...top.map(shortModel), t.other].map((m, i) => (
-                <Text>
-                  <Text color={SERIES[Math.min(i, 3)]}>●</Text>
-                  <Text dimColor> {m}</Text>
-                </Text>
-              ))}
-            </Box>
+        </Box>
+    )
+    const modelsBlock = (
+        <Box flexDirection="column">
+          {section(t.models)}
+          {ranked(
+            g.byModel.slice(0, 4).map((x, i) => ({
+              name: shortModel(x.model),
+              value: x.cost,
+              amount: fmtUsd(x.cost),
+              color: Svg !== undefined ? MODEL_SERIES[Math.min(i, 3)] : undefined,
+            })),
+            g.totalCost,
           )}
         </Box>
+    )
+    const projectsBlock = (
         <Box flexDirection="column">
           {section(t.projects)}
           {ranked(
@@ -1764,13 +2091,153 @@ export const register: Register = (on, options) => {
             g.totalCost,
           )}
         </Box>
-        <Box flexDirection="column">
-          {section(t.models)}
-          {ranked(
-            g.byModel.slice(0, 4).map(x => ({ name: shortModel(x.model), value: x.cost, amount: fmtUsd(x.cost) })),
-            g.totalCost,
+    )
+
+    // The drawing surfaces lead with the limits as rings, what each holds, the plan they are told
+    // against, and the days; the models, projects and the fit open on asking, all with room around.
+    if (Svg !== undefined) {
+      const heading = (text: string) => text.replace(/[:：]\s*$/, '')
+      const capacityCards = capacityRows.length === 0 ? null : (
+        <Box flexDirection="column" rowGap={1}>
+          {section(t.capacity, t.capacityAside(pickNow === null ? t.planUnknown : planLabel(pickNow)))}
+          {pickNow === null && <Text dimColor>{t.planHint}</Text>}
+          {capacityRows.every(r => r.est === null) ? (
+            <Text dimColor>{t.capacityNone}</Text>
+          ) : (
+            <Svg
+              source={capacityCard(
+                capacityRows.flatMap(({ w, fit, est, outlook }) => {
+                  if (est === null) return []
+                  const costs = scan.hits[w.kind] ?? []
+                  return [
+                    {
+                      label: windowLabel(w.kind),
+                      percent: w.percentUsed,
+                      whole: `${t.colWhole} ≈ ${roughUsd(est.capacityUsd)}`,
+                      left: `${t.colLeft} ≈ ${roughUsd(est.remainingUsd)}`,
+                      outlook,
+                      confidence: fit?.confidence ?? 'none',
+                      confidenceWord: `${t.colConfidence} ${t.confidence[fit?.confidence ?? 'none']}`,
+                      hits: costs,
+                      hitsLine: costs.length === 0 ? '' : t.hitsLine(windowLabel(w.kind), costs.length, roughUsd(Math.min(...costs)), roughUsd(Math.max(...costs))),
+                    },
+                  ]
+                }),
+              )}
+              alt={[
+                ...capacityRows.map(({ w, fit, est, outlook }) =>
+                  [windowLabel(w.kind), est !== null ? `${t.colWhole} ≈ ${roughUsd(est.capacityUsd)}` : '', est !== null ? `${t.colLeft} ≈ ${roughUsd(est.remainingUsd)}` : '', outlook, `${t.colConfidence} ${t.confidence[fit?.confidence ?? 'none']}`]
+                    .filter(Boolean)
+                    .join(' · '),
+                ),
+                ...hits,
+              ].join('; ')}
+            />
           )}
         </Box>
+      )
+      // Each fit drawn as an interval plot, the plan multiples and inferred plans as the sentences
+      // they are, and where the figures come from.
+      const fitCards = (
+        <Box flexDirection="column" rowGap={2}>
+          {Object.values(fitted)
+            .filter(f => f.confidence !== 'none' && f.g[1]! > 0)
+            .map(f => {
+              const kinds = [2, 3, 0].map(i => {
+                const [lo, hi] = f.gBand[i] ?? [0, Infinity]
+                const band: [number, number] | null = Number.isFinite(hi) && hi / Math.max(lo, 1e-9) < 50 ? [lo, hi] : null
+                return { name: kindLabel(i), value: f.g[i]! / f.g[1]!, band }
+              })
+              const order = g.byModel.map(m => m.model)
+              const models = Object.entries(f.f)
+                .filter(([m]) => m !== f.ref)
+                .map(([m, value]) => ({ name: shortModel(m), value, color: MODEL_SERIES[Math.min(Math.max(order.indexOf(m), 0), 3)]! }))
+              const multiples = Object.entries(f.planWindows).filter(([p]) => p !== f.refPlan && !p.startsWith('~'))
+              const head = `${t.fitCounts(f.segments, f.hits)}${f.mae !== null ? t.fitMiss(f.mae.toFixed(1)) : ''}${f.outliers > 0 ? t.fitOutliers(f.outliers) : ''}`
+              return (
+                <Box flexDirection="column" rowGap={1}>
+                  <Svg
+                    source={fitCard({
+                      label: windowLabel(f.kind),
+                      confidence: f.confidence,
+                      confidenceWord: `${t.colConfidence} ${t.confidence[f.confidence]}`,
+                      head,
+                      kindsTitle: heading(t.kindWeights),
+                      kinds,
+                      reference: kindLabel(1),
+                      modelsTitle: f.ref === null ? null : heading(t.against(shortModel(f.ref))),
+                      models,
+                      unclear: t.undetermined,
+                    })}
+                    alt={`${windowLabel(f.kind)} · ${t.colConfidence} ${t.confidence[f.confidence]} · ${head} · ${kinds.map(k => `${k.name} ×${k.value.toFixed(2)}${k.band === null ? ` ${t.undetermined}` : ` (${k.band[0].toFixed(2)}–${k.band[1].toFixed(2)})`}`).join(' · ')}`}
+                  />
+                  {multiples.length > 0 && (
+                    <Text dimColor>
+                      {t.against(planLabel(f.refPlan))}
+                      {multiples.map(([p, n]) => `${planLabel(p)} ×${(f.s[p] ?? 0).toFixed(1)}${t.multipleNote(nominalRatio(p, f.refPlan), n)}`).join(' · ')}
+                    </Text>
+                  )}
+                  {f.inferred.map(x => (
+                    <Text dimColor>
+                      {t.inferredLine(day(x.from), day(x.to), x.ratio.toFixed(2), planLabel(x.against), x.guess === null ? null : planLabel(x.guess), x.windows)}
+                    </Text>
+                  ))}
+                </Box>
+              )
+            })}
+          <Text dimColor>
+            {t.dataNote}
+            {g.unpriced.length > 0 ? t.unpriced(g.unpriced.join(', ')) : ''}
+          </Text>
+        </Box>
+      )
+      return (
+        <Box flexDirection="column" rowGap={2}>
+          {tabs}
+          {limits}
+          {picker !== null && capacityRows.length > 0 && (
+            <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
+              {picker}
+              <Text dimColor>{t.capacityAside(pickNow === null ? t.planUnknown : planLabel(pickNow))}</Text>
+            </Box>
+          )}
+          <Box flexDirection="column" rowGap={1}>
+            {controls}
+            {stats([
+              [fmtUsd(g.totalCost), span === '30d' ? t.statRange30 : t.statRangeAll],
+              [fmtUsd(g.days > 0 ? g.totalCost / g.days : 0), t.statPerDay],
+            ])}
+          </Box>
+          {daily}
+          <Box flexDirection="column" rowGap={2}>
+            <Button key="details" label={isOpen ? t.showLess : t.showMore} plain dimColor onPress={() => update($, details, open => !open)} />
+            {isOpen && modelsBlock}
+            {isOpen && projectsBlock}
+            {isOpen && capacityCards}
+            {isOpen && fitCards}
+          </Box>
+          {close}
+        </Box>
+      )
+    }
+    return (
+      <Box flexDirection="column" rowGap={1}>
+        {tabs}
+        {limits}
+        {capacity}
+        <Box flexDirection="column">
+          {section(t.history)}
+          {controls}
+        </Box>
+        {stats([
+          [fmtUsd(g.totalCost), span === '30d' ? t.statRange30 : t.statRangeAll],
+          [fmtUsd(g.days > 0 ? g.totalCost / g.days : 0), t.statPerDay],
+          [fmtTokens(g.totalTokens), t.statTokens],
+          [t.days(g.days), t.statSpan],
+        ])}
+        {daily}
+        {modelsBlock}
+        {projectsBlock}
         <Box flexDirection="column" rowGap={1}>
           <Button key="details" label={isOpen ? t.hideDetails : t.details} plain dimColor onPress={() => update($, details, open => !open)} />
           {isOpen && detailView}

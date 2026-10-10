@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { fmtDuration, fmtTokens, forecast, meterSvg, moveTo, positionOf } from '../hooks/register'
+import { fmtDuration, fmtTokens, forecast, moveTo, niceTicks, positionOf, ringsCard } from '../hooks/register'
 
 const PLUGIN = 'token-almanac'
 const MIN = 60_000
@@ -103,23 +103,28 @@ test('turns, models, limits and context reach the band and the pane', { options:
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const b = await $.ui.mount({ ...band, surface })
-    // 100 + 50 + 1000 + 500 + 8000 + 2000 + 200 + 300 + 9000 = 21,150 tokens.
-    await must(b, { type: 'Text', text: /\$1\.50 · 21k tok · 上下文 25%/ })
-    await must(b, { text: /5 小时 40%/ })
-    await must(b, { text: /4h0m后重置 · 约 3h0m 后用满/ })
+    // The band keeps to the cost, the context, each limit and how soon one fills before its reset.
+    await must(b, { type: 'Text', text: /\$1\.50 · 上下文 25%/ })
+    await must(b, { text: /5 小时 40% 3h0m 后满/ })
     await must(b, { text: /每周 11%/ })
+    expect(await b.find({ text: /重置|tok/ })).toBeUndefined()
     await b.unmount()
 
     const p = await $.ui.mount({ ...pane, surface })
+    // The desktop sets its figures in drawn cards, the makeup and models behind the breakdown;
+    // the terminal writes them all as text.
+    if (surface === 'desktop') await p.press({ key: 'details' })
+    const drawn = surface === 'desktop' ? JSON.stringify(await p.findAll({ type: 'Svg' })) : ''
+    const shows = async (text: string | RegExp) => (surface === 'desktop' ? expect(drawn).toMatch(text) : must(p, { text }))
     // The limits lead: when each resets and the outlook in one line.
-    await must(p, { text: /4h0m后重置 · 约 3h0m 后用满/ })
-    await must(p, { text: /按当前节奏用不满/ })
-    await must(p, { text: '$1.50' })
-    await must(p, { text: '25%' })
-    await must(p, { text: '上下文 200k' })
-    await must(p, { text: 'opus-5-5' })
-    await must(p, { text: 'haiku-5-5' })
-    await must(p, { text: /cache 读 \d+%/ })
+    await shows(/4h0m后重置 · 约 3h0m 后用满/)
+    await shows(/按当前节奏用不满/)
+    await shows('$1.50')
+    await shows('25%')
+    await shows('上下文 200k')
+    await shows('opus-5-5')
+    await shows('haiku-5-5')
+    await shows(/cache 读 (\$[\d.]+ )?\d+%/)
     if (surface === 'desktop') {
       // The first main turn carries its subagent's turn.
       const charts = await p.findAll({ type: 'Svg' })
@@ -151,14 +156,33 @@ describe('motion', () => {
     expect(moveTo('test:b', 30, T0 + 200).from).toBe(mid)
   })
 
-  test('a meter drawn twice at one value is the same drawing; a new value glides', () => {
-    const at40 = moveTo('test:meter', 40, T0)
-    const a = meterSvg(40, at40)
-    expect(meterSvg(40, moveTo('test:meter', 40, T0 + 30_000))).toBe(a)
-    expect(a).toContain('<animate attributeName="width" from="0.0" to="96.0"')
-    const b = meterSvg(55, moveTo('test:meter', 55, T0 + 60_000))
-    expect(b).toContain('from="96.0" to="132.0"')
-    // Without a move, a still meter.
-    expect(meterSvg(55)).not.toContain('<animate')
+  test('a new value glides; once the move is over the ring is drawn still, so a fresh image does not play it again', () => {
+    const row = (percent: number, at: number) => ({ label: '5h', percent, move: moveTo('test:meter', percent, at), projected: null, elapsed: null, reset: '', outlook: '', lines: [] })
+    const key = { elapsed: 'elapsed', projected: 'projected' }
+    // A ring of radius 40 is 251.3 around: 40% leaves 150.8 of it undrawn.
+    const a = ringsCard([row(40, T0)], key, T0)
+    expect(a).toContain('<animate attributeName="stroke-dashoffset" from="251.3" to="150.8"')
+    // Drawn again after the move: the still ring, the same as one drawn without a move.
+    expect(ringsCard([row(40, T0 + 30_000)], key, T0 + 30_000)).toBe(ringsCard([{ ...row(40, T0 + 30_000), move: null }], key, T0 + 30_000))
+    const b = ringsCard([row(55, T0 + 60_000)], key, T0 + 60_000)
+    expect(b).toContain('from="150.8" to="113.1"')
+  })
+
+  test('a limit shows where it is headed, how far through its window the clock is and what it holds, with a key', () => {
+    const svg = ringsCard(
+      [{ label: '每周', percent: 46, move: null, projected: 80, elapsed: 0.3, reset: '4d21h后重置', outlook: '约 1d18h 后用满', lines: ['整窗 ≈ $294', '剩余 ≈ $159'] }],
+      { elapsed: '窗口时间进度', projected: '按节奏预计到重置' },
+      T0,
+    )
+    // The paler arc reaches 80% (a fifth undrawn); the tick sits three tenths of the way round.
+    expect(svg).toContain('stroke-dashoffset="50.27" transform="rotate(-90 200.0 49)" stroke="#D97757" stroke-opacity="0.25"')
+    expect(svg).toContain('x1="230.9" y1="59.0"')
+    for (const text of ['46%', '每周', '4d21h后重置', '约 1d18h 后用满', '整窗 ≈ $294', '剩余 ≈ $159', '窗口时间进度', '按节奏预计到重置']) expect(svg).toContain(text)
+  })
+
+  test('gridlines fall on clean values just past the top', () => {
+    expect(niceTicks(764)).toEqual([0, 200, 400, 600, 800])
+    expect(niceTicks(12_000)).toEqual([0, 5000, 10000, 15000])
+    expect(niceTicks(0)).toEqual([0])
   })
 })

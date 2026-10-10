@@ -109,14 +109,16 @@ test('the pane switches to the global view, scans, and changes range', { options
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const p = await $.ui.mount({ ...pane, surface })
+    // The desktop sets its figures in drawn cards; the terminal writes them as text.
+    const shows = async (text: string) => (surface === 'desktop' ? expect(JSON.stringify(await p.findAll({ type: 'Svg' }))).toContain(text) : must(p, { text }))
     await must(p, { text: /3 个文件 · 刚刚更新/ })
-    await must(p, { text: '$7.00' })
-    await must(p, { text: '日均' })
-    await must(p, { text: 'Projects/oss' })
-    // The details stay folded until asked for.
+    await shows('$7.00')
+    await shows('日均')
+    // The details stay folded until asked for; on the drawing surfaces the projects are among them.
     expect(await p.find({ text: /未定价/ })).toBeUndefined()
     await p.press({ key: 'details' })
     await must(p, { text: /未定价、按 0 计：<synthetic>/ })
+    await shows('Projects/oss')
     await p.press({ key: 'details' })
     if (surface === 'desktop') await must(p, { type: 'Svg' })
     else await must(p, { text: /10-09/ })
@@ -128,6 +130,51 @@ test('the pane switches to the global view, scans, and changes range', { options
   await must(p, { text: /71 天/ })
   await p.press({ key: 'tab-session' })
   await must(p, { text: '构成' })
+  await p.unmount()
+})
+
+test('on the desktop a scan does not redraw every frame, and a refresh does not hold the press', { options: { language: 'zh' } }, async ($, on) => {
+  let now = NOW
+  let runs = 0
+  const every: number[] = []
+  const after: number[] = []
+  on('clock.now', () => ({ value: now }))
+  // Periods are noted and refused, so no interval runs; waits are noted and let through.
+  on('clock.every', ($: unknown, e: { ms: number }) => (every.push(e.ms), { deny: 'test' }) as never)
+  on('clock.after', ($: unknown, e: { ms: number }) => (after.push(e.ms), { value: undefined }) as never)
+  on('clock.sleep', () => ({ value: undefined }) as never)
+  const store: Record<string, unknown> = {}
+  on('store.get', ($: unknown, e: { key: string }) => ({ value: store[e.key] }) as never)
+  on('store.set', ($: unknown, e: { key: string; value: unknown }) => ((store[e.key] = e.value), { value: undefined }) as never)
+  on('fs.read', () => ({ value: '{}' }) as never)
+  on('env.get', ($: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }) as never)
+  on('process.run', () => ((runs += 1), { value: { exitCode: 0, stdout: JSON.stringify(scanWith(M)), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never)
+  on('session.measure', ($: unknown, e: { changed: string[] }) => ({ changed: e.changed }) as never)
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  await $.session.measure({ context: { tokens: 1000, window: 200_000, percent: 1 }, rateLimits: [five(40)], cost: { usd: 1 }, changed: ['rateLimits'] } as never)
+
+  const pane = {
+    plugin: 'token-almanac',
+    component: 'Pane' as const,
+    requestId: 'token-almanac',
+    props: { title: 'Token 用量', isFocused: true, bodyColumns: 80, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 80 }, view: {} },
+  }
+  const p = await $.ui.mount({ ...pane, surface: 'desktop' })
+  // The first scan runs in the open: the press waits for it.
+  await p.press({ key: 'tab-global' })
+  expect(runs).toBe(1)
+  // Two minutes on, the figures are refreshed behind the view, after the press has returned.
+  now += 2 * 60_000
+  await p.press({ key: 'tab-session' })
+  const waits = after.length
+  await p.press({ key: 'tab-global' })
+  expect(after.slice(waits)).toContain(0)
+  await must(p, { text: /3 个文件/ })
+  // No scan asked the desktop for a redraw every frame.
+  expect(every.filter(ms => ms < 1000)).toEqual([])
   await p.unmount()
 })
 
@@ -170,7 +217,8 @@ test('the global view leads with what each window holds and has left', { options
   }
   const first = await $.ui.mount({ ...pane, surface: 'terminal' })
   await first.press({ key: 'tab-global' })
-  // No plan picked yet: the estimates say so and ask for one.
+  // The estimates sit in the details. No plan picked yet: they say so and ask for one.
+  await first.press({ key: 'details' })
   await must(first, { text: '不确定 · 按 API 价格折算' })
   await must(first, { text: /选择你的套餐/ })
   await first.select({ key: 'plan', value: 'pro' })
@@ -180,17 +228,23 @@ test('the global view leads with what each window holds and has left', { options
     const p = await $.ui.mount({ ...pane, surface })
     await must(p, { text: '容量推算' })
     await must(p, { text: 'Pro · 按 API 价格折算' })
-    await must(p, { text: '整窗' })
+    // The terminal writes the table; the desktop draws a card per window with the same figures.
+    const drawn = JSON.stringify(await p.findAll({ type: 'Svg' }))
+    const shows = async (text: string) => (surface === 'desktop' ? expect(drawn).toContain(text) : must(p, { text }))
+    await shows('整窗')
     // About $80 a window: $20 so far is a quarter of it, and three quarters are left.
-    const whole = (await p.find({ text: /^≈ \$\d+$/ })) as { text?: string } | undefined
-    const amounts = JSON.stringify(await p.findAll({ text: /^≈ \$\d+$/ }))
-    expect(whole).toBeDefined()
-    // Each amount is found on its cell and on its text: the drawn order, once each.
+    const amounts = surface === 'desktop' ? drawn : JSON.stringify(await p.findAll({ text: /^≈ \$\d+$/ }))
+    // Each amount is found more than once (cell and text, or ring and card): the drawn order, once each.
     const [cap, left] = [...new Set([...amounts.matchAll(/≈ \$(\d+)/g)].map(m => Number(m[1])))]
     expect(cap! > 60 && cap! < 100).toBe(true)
     expect(Math.abs(left! - cap! * 0.75) <= 1).toBe(true)
-    await must(p, { text: '低' })
-    await must(p, { text: '5 小时历史触限 2 次，每次折合 $60–$100' })
+    await shows('低')
+    await shows('5 小时历史触限 2 次，每次折合 $60–$100')
+    if (surface === 'desktop') {
+      // Both hits sit on the dollar scale; the fit is drawn as an interval plot against output.
+      expect(drawn.match(/r=\\"4\.5\\" fill=\\"#D97757\\" fill-opacity=\\"0\.55\\"/g)?.length).toBe(2)
+      expect(drawn).toContain('每 API 美元相对 output')
+    }
     await p.unmount()
   }
 })

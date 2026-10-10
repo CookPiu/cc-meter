@@ -85,8 +85,8 @@ test('the views speak English when asked', { options: { language: 'en' } }, asyn
   } as never)
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const b = await $.ui.mount({ ...band, surface })
-    await must(b, { text: /Session \$1\.50 · 0 tok · context 25%/ })
-    await must(b, { text: /5-hour 40% resets in 4h0m/ })
+    await must(b, { text: /\$1\.50 · context 25%/ })
+    await must(b, { text: /5-hour 40%/ })
     await must(b, { text: /Weekly Opus 12%/ })
     // A window this mod has no name for is shown by its own.
     await must(b, { text: /some new window 5%/ })
@@ -94,15 +94,19 @@ test('the views speak English when asked', { options: { language: 'en' } }, asyn
 
     const p = await $.ui.mount({ ...pane, surface })
     await must(p, { text: 'This session' })
+    // On the drawing surfaces what the session is made of opens on asking.
+    if (surface !== 'terminal') await p.press({ key: 'details' })
     await must(p, { text: 'API-equivalent' })
     await must(p, { text: 'Makeup' })
     expect(await p.find({ text: /[一-龥]/ })).toBeUndefined()
+    expect(JSON.stringify(await p.findAll({ type: 'Svg' }))).not.toMatch(/[一-龥]/)
     if (surface !== 'mobile') {
       await p.press({ key: 'tab-global' })
       await must(p, { text: /2 files · just now/ })
+      // The estimates sit with the fit in the details, already open on the drawing surfaces.
+      if (surface === 'terminal') await p.press({ key: 'details' })
       await must(p, { text: 'Not sure · API-equivalent' })
       await must(p, { text: /Pick your plan/ })
-      await p.press({ key: 'details' })
       await must(p, { text: /From the Claude Code transcripts/ })
       await p.press({ key: 'details' })
       await p.press({ key: 'tab-session' })
@@ -174,6 +178,7 @@ test('a plan picked in the pane is kept; a change within a day corrects it, a la
   await $.session.measure({ context: { tokens: 1000, window: 200_000, percent: 1 }, rateLimits: [{ kind: 'five_hour', percentUsed: 10, resetsAt: new Date(T0 + HOUR).toISOString() }], cost: { usd: 0.2 }, changed: ['rateLimits'] } as never)
   const p = await $.ui.mount({ ...pane, surface: 'terminal' })
   await p.press({ key: 'tab-global' })
+  await p.press({ key: 'details' })
   await p.select({ key: 'plan', value: 'max5x' })
   await must(p, { text: 'Max 5x · API-equivalent' })
   advance(HOUR)

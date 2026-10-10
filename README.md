@@ -6,14 +6,16 @@ A Claude Code mod that shows how much of your plan's usage limits you have used,
 
 ## What it shows
 
-**Band above the prompt**: the session's cost and tokens, context use, and each limit window (5-hour, weekly) with its percent, reset countdown and a fill-time forecast. It has buttons to open the pane or hide the band.
+**Band above the prompt**: the session's cost and context use, and each limit window (5-hour, weekly) with its percent and, when it will fill before its reset, how soon. It has buttons to open the pane or hide the band.
 
 **Pane** (`/token-almanac`, or the band's button), with two views:
 
 | View | Contents |
 |---|---|
-| This session | Limit meters, cost, tokens, context, turns; token makeup by API-equivalent cost; per-turn chart (subagent turns folded into the turn that started them); per-model split |
-| This machine | Limit meters; capacity estimate per window (API-equivalent dollars a full window holds, what is left, whether it fills before the reset at your usual hourly pace, confidence); your plan, picked from a list; past limit hits on it; 30-day or all-time totals; daily chart by model; top projects and models; estimate details, with any earlier plan inferred from the history |
+| This session | Limit rings, cost, tokens, context, turns; per-turn chart (subagent turns folded into the turn that started them); under *Show breakdown*, token makeup by API-equivalent cost and the per-model split |
+| This machine | Limit rings, each with the API-equivalent dollars a full window holds and what is left; your plan, picked from a list; 30-day or all-time totals; daily chart by model; under *Show breakdown*, top models and projects, a capacity card per window (whether it fills before the reset at your usual hourly pace, confidence, past limit hits on your plan on a dollar scale) and the estimate details as interval plots, with any earlier plan inferred from the history |
+
+Each ring shows the share used, a paler arc for where the window is headed by its reset, and a tick for how far through the window the clock is. In the terminal the same figures are written as text, with meters in place of the rings and the capacity table under them.
 
 The UI is in English or Chinese, picked from the `language` option, then Claude Code's `language` setting, then `LC_ALL` / `LANG`, then the system locale. It renders in the terminal, the desktop app, VS Code and mobile.
 
