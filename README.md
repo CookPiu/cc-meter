@@ -66,13 +66,17 @@ The pane shows the confidence and the fitted factors. Use from claude.ai or othe
 
 ## What it reads, writes and runs
 
-Everything stays on your machine. The mod makes no network requests.
+Everything stays on your machine. Nothing is sent anywhere: the mod makes no network requests, and the program it runs makes none either.
 
 - **Reads** Claude Code's transcripts under `<config>/projects/` to count tokens; message text is parsed only to find turn boundaries and is never stored or sent.
-- **Reads** the `subscriptionType` and `rateLimitTier` fields of `<config>/.credentials.json` to note plan changes. No token or other field is kept. On macOS the credentials live in the Keychain, which the mod does not read; edit the timeline in the pane instead.
+- **Reads** the `subscriptionType` and `rateLimitTier` fields of `<config>/.credentials.json` to note plan changes. These two fields name the plan tier and are not secrets; no token or other field is read into the mod, kept or sent. On macOS the credentials live in the Keychain, which the mod does not read; edit the timeline in the pane instead.
 - **Reads** Claude Code's `language` setting and the `CLAUDE_CONFIG_DIR`, `HOME`, `USERPROFILE`, `LC_ALL` and `LANG` environment variables.
-- **Writes** `<config>/cc-meter/cache.json` (per-file read offsets and 10-minute sums, so later scans read only new lines) and `<config>/cc-meter/plans.json` (the plan timeline), plus limit readings in the plugin's own store.
-- **Runs** the bundled `scan/scan.mjs` with Node.js, because transcripts are larger than the mod environment can read.
+- **Writes** two files of its own and nothing else: `<config>/cc-meter/cache.json` (per-file read offsets and 10-minute sums, so later scans read only new lines) and `<config>/cc-meter/plans.json` (the plan timeline). Only cc-meter reads them; they are not settings, instructions or scripts for Claude Code or any other tool. Limit readings go in the plugin's own store.
+- **Runs** one program: Node.js (`node`, or the `nodePath` option) on the bundled `scan/scan.mjs`, because transcripts are larger than the mod environment can read. The two command lines are
+  - `node <plugin>/scan/scan.mjs session <this session's transcript>`, when a session starts, to count what ran before the mod loaded;
+  - `node <plugin>/scan/scan.mjs global <config>/projects <config>/cc-meter/cache.json`, when the machine view opens or refreshes, with the window start times and limit readings on stdin.
+
+  The scanner reads the files above and the plan timeline, writes only `cache.json`, prints token sums as JSON on stdout for the mod, and makes no network requests. Its source is in `scan/scan.mjs`.
 
 ## Development
 

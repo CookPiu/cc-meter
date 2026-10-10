@@ -670,9 +670,7 @@ async function transcriptPath($: EngineInterface): Promise<string> {
 // loaded counts. The scanner reads them: a transcript outgrows what `$.fs.read` takes (4 MiB).
 // Answers whether it read one; the live counts stand when it cannot.
 async function backfill($: EngineInterface, path: string): Promise<boolean> {
-  const run = await $.process
-    .run([nodeBin, `${$.plugin.root}/scan/scan.mjs`, 'session', path], { timeoutMs: 60_000 })
-    .catch(() => null)
+  const run = await $.process.run([nodeBin, `${$.plugin.root}/scan/scan.mjs`, 'session', path], { timeoutMs: 60_000 }).catch(() => null)
   if (run === null || run.exitCode !== 0) {
     $.ui.log(`cc-meter: could not read ${path}: ${run?.stderr.split('\n')[0] ?? 'node did not run'}`, { to: 'debug' })
     return false

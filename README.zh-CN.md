@@ -66,13 +66,17 @@ Claude Code 只报告每个限额的百分比和重置时间。为了换算成�
 
 ## 读取、写入与运行的内容
 
-所有数据都留在本机，mod 不发出任何网络请求。
+所有数据都留在本机，不向任何地方发送：mod 本身不发网络请求，它运行的程序也不发。
 
-- **读取** `<config>/projects/` 下的会话记录来统计 token；消息文本只用于识别轮次边界，不保存、不外发。
-- **读取** `<config>/.credentials.json` 中的 `subscriptionType` 和 `rateLimitTier` 两个字段，用于记录套餐变化，不保留令牌或其他字段。macOS 上凭据在钥匙串里，mod 不读取，请在面板里手动编辑时间线。
-- **读取** Claude Code 的 `language` 设置，以及环境变量 `CLAUDE_CONFIG_DIR`、`HOME`、`USERPROFILE`、`LC_ALL`、`LANG`。
-- **写入** `<config>/cc-meter/cache.json`（各文件的读取偏移和 10 分钟汇总，之后只读新增内容）和 `<config>/cc-meter/plans.json`（套餐时间线），以及插件自身存储中的限额读数。
-- **运行** 随插件附带的 `scan/scan.mjs`（通过 Node.js），因为会话记录超出 mod 环境的读取上限。
+- **读取** `<config>/projects/` 下的 Claude Code 会话记录来统计 token；消息文本只用来识别轮次边界，从不保存或发送。
+- **读取** `<config>/.credentials.json` 中的 `subscriptionType` 和 `rateLimitTier` 两个字段，用来记录套餐变化。这两个字段只表示套餐等级，不是密钥；令牌和其他字段都不会读入 mod，也不保存、不发送。macOS 的凭据在钥匙串里，mod 不读取，请在面板里编辑套餐时间线。
+- **读取** Claude Code 的 `language` 设置，以及 `CLAUDE_CONFIG_DIR`、`HOME`、`USERPROFILE`、`LC_ALL`、`LANG` 环境变量。
+- **写入** 只有自己的两个文件：`<config>/cc-meter/cache.json`（各文件的读取偏移和 10 分钟汇总，之后只读新增内容）和 `<config>/cc-meter/plans.json`（套餐时间线）。只有 cc-meter 自己读取它们，它们不是 Claude Code 或其他工具的设置、指令或脚本。限额读数存在插件自己的存储里。
+- **运行** 一个程序：用 Node.js（`node`，或 `nodePath` 选项指定的路径）运行插件自带的 `scan/scan.mjs`，因为会话记录超过了 mod 环境能读取的大小。两种命令行是：
+  - `node <插件目录>/scan/scan.mjs session <本会话的记录文件>`，会话开始时运行，补算 mod 加载前的用量；
+  - `node <插件目录>/scan/scan.mjs global <config>/projects <config>/cc-meter/cache.json`，打开或刷新本机全局视图时运行，标准输入传入窗口起点和限额读数。
+
+  扫描程序只读取上面列出的文件和套餐时间线，只写 `cache.json`，把 token 汇总以 JSON 输出到标准输出交给 mod，不发任何网络请求。源码见 `scan/scan.mjs`。
 
 ## 开发
 
