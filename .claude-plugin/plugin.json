@@ -9,6 +9,9 @@
   },
   "homepage": "https://github.com/CookPiu/token-almanac",
   "repository": "https://github.com/CookPiu/token-almanac",
+  "documentationUrl": "https://github.com/CookPiu/token-almanac#readme",
+  "supportUrl": "https://github.com/CookPiu/token-almanac/issues",
+  "privacyPolicyUrl": "https://github.com/CookPiu/token-almanac/blob/main/PRIVACY.md",
   "license": "MIT",
   "keywords": [
     "usage",
