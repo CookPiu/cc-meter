@@ -9,9 +9,7 @@
 //     Every transcript under the projects dir, read incrementally (the cache keeps each file's
 //     read offset, 10-minute buckets and the limit hits it met), summed per local day, hour,
 //     project and model; sums since each window's start; and, for the fit, each limit reading
-//     and limit hit with what each model cost in its window up to that moment, tagged with the
-//     plan <config>/token-almanac/plans.json says was in force. The current plan tier is read from
-//     <config>/.credentials.json: the two plan fields alone, never a token.
+//     and limit hit with what each model cost in its window up to that moment.
 //
 // Token vectors are [input, output, cacheRead, cacheWrite5m, cacheWrite1h].
 
@@ -191,37 +189,6 @@ export function windowLength(kind) {
   return null
 }
 
-// The plan timeline, each entry from local midnight of its day; and the plan at a moment.
-export function resolvePlans(entries) {
-  return (Array.isArray(entries) ? entries : [])
-    .map(e => {
-      const [y, m, d] = String(e.from).split('-').map(Number)
-      return { ...e, fromMs: new Date(y, (m ?? 1) - 1, d ?? 1).getTime() }
-    })
-    .filter(e => Number.isFinite(e.fromMs) && typeof e.plan === 'string')
-    .sort((a, b) => a.fromMs - b.fromMs)
-}
-
-export function planAt(plans, t) {
-  let plan = null
-  for (const e of plans) if (e.fromMs <= t) plan = e.plan
-  return plan
-}
-
-// The plan fields of Claude Code's credentials, and nothing else of the file.
-async function readAccount(path) {
-  const data = await fsp
-    .readFile(path, 'utf8')
-    .then(JSON.parse)
-    .catch(() => null)
-  for (const value of Object.values(data ?? {})) {
-    if (value && typeof value === 'object' && ('rateLimitTier' in value || 'subscriptionType' in value)) {
-      return { subscriptionType: value.subscriptionType ?? null, rateLimitTier: value.rateLimitTier ?? null }
-    }
-  }
-  return null
-}
-
 // What each model cost in [start, end), from buckets sorted by start, to the bucket.
 function sumRange(sorted, start, end) {
   const byModel = {}
@@ -246,7 +213,7 @@ function sumExact(recent, start, end) {
 
 // Every limit reading and limit hit, with its window's cost per model up to that moment: exact
 // where the kept responses cover the whole window, to the bucket before that.
-export function observations(buckets, hits, readings, plans, recent = [], recentFrom = Infinity) {
+export function observations(buckets, hits, readings, recent = [], recentFrom = Infinity) {
   const sorted = Object.entries(buckets)
     .map(([id, v]) => {
       const [t, , model] = id.split('|')
@@ -263,12 +230,11 @@ export function observations(buckets, hits, readings, plans, recent = [], recent
     const start = o.resetsAt - length
     const exact = start >= recentFrom
     const byModel = exact ? sumExact(recent, start, o.t) : sumRange(sorted, start, o.t)
-    return [{ ...o, plan: planAt(plans, o.t), exact, byModel }]
+    return [{ ...o, exact, byModel }]
   })
 }
 
 export async function scanGlobal(projectsDir, cachePath, windows, now = Date.now(), readings = []) {
-  const config = dirname(projectsDir)
   const startedAt = Date.now()
   let cache = await fsp
     .readFile(cachePath, 'utf8')
@@ -324,18 +290,9 @@ export async function scanGlobal(projectsDir, cachePath, windows, now = Date.now
   await fsp.writeFile(tmp, JSON.stringify(cache))
   await fsp.rename(tmp, cachePath)
 
-  const planFile = await fsp
-    .readFile(join(config, 'token-almanac', 'plans.json'), 'utf8')
-    .then(JSON.parse)
-    .catch(() => null)
-  const plans = resolvePlans(planFile?.plans)
-
   return {
     ...summarize(cache.buckets, windows),
-    observations: observations(cache.buckets, cache.hits, readings, plans, cache.recent, cache.recentFrom),
-    plans,
-    planNow: planAt(plans, now),
-    account: await readAccount(join(config, '.credentials.json')),
+    observations: observations(cache.buckets, cache.hits, readings, cache.recent, cache.recentFrom),
     // The mod's environment may not keep this machine's time zone: days and hours are ours.
     today: localDay(new Date(now)),
     tzOffsetMin: -new Date(now).getTimezoneOffset(),

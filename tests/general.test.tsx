@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { fitKind, fittedWindow, pickLocale, priceOf, setPriceOverrides, spendByKind, tierPlan } from '../hooks/register'
+import { fitKind, fittedWindow, pickLocale, priceOf, setPriceOverrides, spendByKind } from '../hooks/register'
 import { localeOf } from '../hooks/i18n'
-import type { GlobalScan, Observation, Vec } from '../types'
+import type { Observation, PlanChoice, Vec } from '../types'
 
 const M = 1_000_000
 const MIN = 60_000
@@ -37,8 +37,7 @@ function engine(on: any, scan?: () => unknown) {
   on('store.get', ($: unknown, e: { key: string }) => ({ value: store[e.key] }) as never)
   on('store.set', ($: unknown, e: { key: string; value: unknown }) => ((store[e.key] = e.value), { value: undefined }) as never)
   on('env.get', ($: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }) as never)
-  on('fs.read', () => ({ value: '{"plans":[],"detected":null}' }) as never)
-  on('fs.write', () => ({ value: undefined }) as never)
+  on('fs.read', () => ({ value: '{}' }) as never)
   on('process.run', () => {
     // As the engine answers a command it cannot start.
     if (scan === undefined) return { deny: 'spawn node ENOENT' } as never
@@ -49,7 +48,7 @@ function engine(on: any, scan?: () => unknown) {
     const { Text } = $.ui.resolve(e)
     return <Text>engine</Text>
   })
-  return { advance: (ms: number) => (now += ms) }
+  return { store, advance: (ms: number) => (now += ms) }
 }
 
 describe('language', () => {
@@ -72,7 +71,7 @@ describe('language', () => {
 })
 
 test('the views speak English when asked', { options: { language: 'en' } }, async ($, on) => {
-  engine(on, () => ({ rows: [], windows: {}, observations: [], plans: [], planNow: null, account: null, today: '2026-10-10', tzOffsetMin: 0, files: 2, readBytes: 0, ms: 3, at: T0 }))
+  engine(on, () => ({ rows: [], windows: {}, observations: [], today: '2026-10-10', tzOffsetMin: 0, files: 2, readBytes: 0, ms: 3, at: T0 }))
   await $.session.measure({
     context: { tokens: 50_000, window: 200_000, percent: 25 },
     rateLimits: [
@@ -100,8 +99,10 @@ test('the views speak English when asked', { options: { language: 'en' } }, asyn
     if (surface !== 'mobile') {
       await p.press({ key: 'tab-global' })
       await must(p, { text: /2 files · just now/ })
+      await must(p, { text: 'Not sure · API-equivalent' })
+      await must(p, { text: /Pick your plan/ })
       await p.press({ key: 'details' })
-      await must(p, { text: /No plan changes recorded/ })
+      await must(p, { text: /From the Claude Code transcripts/ })
       await p.press({ key: 'details' })
       await p.press({ key: 'tab-session' })
     }
@@ -131,13 +132,6 @@ test('without Node.js the global view says how to fix it, and the session view s
 })
 
 describe('plans', () => {
-  test('credential tiers, known and not', () => {
-    expect(tierPlan({ subscriptionType: 'max', rateLimitTier: 'default_claude_max_20x' })).toBe('max20x')
-    expect(tierPlan({ subscriptionType: 'team', rateLimitTier: 'default_claude_team_premium' })).toBe('team_premium')
-    expect(tierPlan({ subscriptionType: 'enterprise', rateLimitTier: 'whatever' })).toBe('enterprise')
-    expect(tierPlan({ subscriptionType: null, rateLimitTier: 'default_claude_future_plan' })).toBe('default_claude_future_plan')
-  })
-
   // One API dollar of output fills 1% of the reference window; Team's window is 2.5 times it.
   const S: Record<string, number> = { current: 1, pro: 1, team: 2.5 }
   const STEP: Vec = [0, 50_000, 0, 0, 0]
@@ -148,11 +142,11 @@ describe('plans', () => {
     return Array.from({ length: steps }, (_, i) => {
       const v = STEP.map(x => x * (i + 1)) as Vec
       const share = (spendByKind('claude-opus-5-5', v)[1]! * 0.01) / S[plan ?? 'current']!
-      return { t: clock + i * MIN, kind: 'five_hour', y: Math.round(share * 100) / 100, resetsAt, hit: false, plan, byModel: { 'claude-opus-5-5': v } }
+      return { t: clock + i * MIN, kind: 'five_hour', y: Math.round(share * 100) / 100, resetsAt, hit: false, byModel: { 'claude-opus-5-5': v } }
     })
   }
 
-  test('with no timeline, every reading is the current plan and the fit still works', () => {
+  test('with no pick, every window is the current plan and the fit still works', () => {
     const fit = fitKind('five_hour', [...windowOf(null, 40), ...windowOf(null, 60)])
     expect(fit.refPlan).toBe('current')
     expect(fit.confidence === 'none').toBe(false)
@@ -162,42 +156,38 @@ describe('plans', () => {
   })
 
   test('a plan sold without a multiple is fitted from its own windows', () => {
-    const fit = fitKind('five_hour', [...windowOf('pro', 40), ...windowOf('pro', 60), ...windowOf('pro', 30), ...windowOf('team', 100), ...windowOf('team', 150)])
+    const pro = [...windowOf('pro', 40), ...windowOf('pro', 60), ...windowOf('pro', 30)]
+    const choices: PlanChoice[] = [
+      { at: 0, plan: 'pro' },
+      { at: clock + 10 * HOUR, plan: 'team' },
+    ]
+    const fit = fitKind('five_hour', [...pro, ...windowOf('team', 100), ...windowOf('team', 150)], choices)
     // Team's readings were made from 2.5x: with no sold ratio to lean on, the data sets it.
-    expect(fit.refPlan).toBe('pro')
-    expect(Math.abs((fit.s['team'] ?? 0) - 2.5) < 0.25).toBe(true)
+    expect(fit.refPlan).toBe('team')
+    expect(Math.abs((fit.s['team'] ?? 0) / (fit.s['pro'] ?? 1) - 2.5) < 0.25).toBe(true)
   })
 })
 
-test('a tier change into an empty timeline records what came before it', async ($, on) => {
-  const files: Record<string, string> = { 'C:/Users/me/.claude/token-almanac/plans.json': JSON.stringify({ plans: [], detected: null }) }
-  const key = (path: string) => path.replace(/\\/g, '/')
-  let tier = 'default_claude_max_5x'
-  const scan = (): GlobalScan => {
-    const plans = (JSON.parse(files['C:/Users/me/.claude/token-almanac/plans.json']!) as { plans: { from: string; plan: string }[] }).plans
-    return { rows: [], windows: {}, observations: [], plans, planNow: plans.at(-1)?.plan ?? null, account: { subscriptionType: 'max', rateLimitTier: tier }, today: '2026-10-10', tzOffsetMin: 0, files: 0, readBytes: 0, ms: 1, at: T0 }
-  }
-  on('clock.now', () => ({ value: T0 }))
-  on('clock.after', () => ({ value: { cancel: () => undefined } }) as never)
-  on('store.get', () => ({ value: undefined }))
-  on('env.get', ($: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }) as never)
-  on('fs.read', ($: unknown, e: { path: string }) => ({ value: files[key(e.path)] ?? '' }) as never)
-  on('fs.write', ($: unknown, e: { path: string; text: string }) => ((files[key(e.path)] = e.text), { value: undefined }) as never)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify(scan()), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never)
-  on('ui.toast', () => ({ value: undefined }) as never)
-  on('ui.render', ($: any, e: any) => {
-    const { Text } = $.ui.resolve(e)
-    return <Text>engine</Text>
-  })
-  const p = await $.ui.mount({ ...pane, surface: 'desktop' })
+test('a plan picked in the pane is kept; a change within a day corrects it, a later one adds to it', { options: { language: 'en' } }, async ($, on) => {
+  const { store, advance } = engine(on, () => ({ rows: [], windows: {}, observations: [], today: '2026-10-10', tzOffsetMin: 0, files: 0, readBytes: 0, ms: 1, at: T0 }))
+  await $.session.measure({ context: { tokens: 1000, window: 200_000, percent: 1 }, rateLimits: [{ kind: 'five_hour', percentUsed: 10, resetsAt: new Date(T0 + HOUR).toISOString() }], cost: { usd: 0.2 }, changed: ['rateLimits'] } as never)
+  const p = await $.ui.mount({ ...pane, surface: 'terminal' })
   await p.press({ key: 'tab-global' })
-  tier = 'default_claude_ai'
-  await p.press({ key: 'rescan' })
-  const file = JSON.parse(files['C:/Users/me/.claude/token-almanac/plans.json']!) as { plans: { from: string; plan: string; source: string }[] }
-  expect(file.plans.map(x => [x.from, x.plan, x.source])).toEqual([
-    ['2000-01-01', 'max5x', 'auto'],
-    ['2026-10-10', 'default_claude_ai', 'auto'],
+  await p.select({ key: 'plan', value: 'max5x' })
+  await must(p, { text: 'Max 5x · API-equivalent' })
+  advance(HOUR)
+  await p.select({ key: 'plan', value: 'max20x' })
+  expect(store.planChoices).toEqual([{ at: T0, plan: 'max20x' }])
+  advance(3 * 24 * HOUR)
+  await p.select({ key: 'plan', value: 'pro' })
+  advance(2 * 24 * HOUR)
+  await p.select({ key: 'plan', value: 'unknown' })
+  expect(store.planChoices).toEqual([
+    { at: T0, plan: 'max20x' },
+    { at: T0 + 73 * HOUR, plan: 'pro' },
+    { at: T0 + 121 * HOUR, plan: null },
   ])
+  await must(p, { text: 'Not sure · API-equivalent' })
   await p.unmount()
 })
 

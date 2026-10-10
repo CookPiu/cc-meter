@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { costOf, fitKind, fittedWindow, segmentsOf, shareOf, spendByKind, tierPlan } from '../hooks/register'
-import type { GlobalScan, Observation, Vec } from '../types'
+import { costOf, fitKind, fittedWindow, guessPlan, segmentsOf, shareOf, spendByKind, stretchesOf } from '../hooks/register'
+import type { Observation, PlanChoice, Vec } from '../types'
 
 const M = 1_000_000
 const HOUR = 3_600_000
@@ -36,14 +36,16 @@ function windowOf(plan: string, model: string, steps: Vec[]): Observation[] {
     const share = trueShare(plan, model, v)
     const t = clock + i * 60_000
     if (share >= 1) {
-      if (!out.some(o => o.hit)) out.push({ t, kind: 'five_hour', y: 1, resetsAt, hit: true, plan, byModel: { [model]: v } })
+      if (!out.some(o => o.hit)) out.push({ t, kind: 'five_hour', y: 1, resetsAt, hit: true, byModel: { [model]: v } })
       return
     }
-    out.push({ t, kind: 'five_hour', y: Math.round(share * 100) / 100, resetsAt, hit: false, plan, byModel: { [model]: v } })
+    out.push({ t, kind: 'five_hour', y: Math.round(share * 100) / 100, resetsAt, hit: false, byModel: { [model]: v } })
   })
   return out
 }
 const times = (n: number, step: Vec) => new Array<Vec>(n).fill(step)
+// When the next window windowOf makes begins.
+const nextStart = () => clock + 10 * HOUR
 
 const data: Observation[] = [
   // Pro on Opus 5.5, some windows mostly one long session, some mostly many sessions, some mixed.
@@ -57,13 +59,16 @@ const data: Observation[] = [
   ...windowOf('pro', 'claude-opus-5', times(200, LONG)),
   ...windowOf('pro', 'claude-opus-5', times(60, MANY)),
   ...windowOf('pro', 'claude-opus-5', [...times(60, LONG), ...times(30, MANY)]),
-  // Max 5x on Opus 5.5.
-  ...windowOf('max5x', 'claude-opus-5-5', times(60, MANY)),
-  ...windowOf('max5x', 'claude-opus-5-5', times(150, LONG)),
 ]
+// Max 5x on Opus 5.5, picked as it began.
+const choices: PlanChoice[] = [
+  { at: 0, plan: 'pro' },
+  { at: nextStart(), plan: 'max5x' },
+]
+data.push(...windowOf('max5x', 'claude-opus-5-5', times(60, MANY)), ...windowOf('max5x', 'claude-opus-5-5', times(150, LONG)))
 
 describe('fit', () => {
-  const fit = fitKind('five_hour', data)
+  const fit = fitKind('five_hour', data, choices)
   const rel = (k: number) => fit.g[k]! / fit.g[1]!
 
   test('learns that cache reads count far less, and cache writes more, than API prices say', () => {
@@ -74,7 +79,11 @@ describe('fit', () => {
     expect(Math.abs(fit.f['claude-opus-5-5']! - 1 / 0.6) < 0.15).toBe(true)
     // The band holds the truth and is narrow enough to say something.
     expect(fit.gBand[2]![0] < 0.05 && fit.gBand[2]![1] > 0.05 && fit.gBand[2]![1] < 0.15).toBe(true)
-    expect(Math.abs(fit.s['max5x']! - 3) < 0.4).toBe(true)
+    // The plan picked now is the reference; Pro's window is a third of it.
+    expect(fit.refPlan).toBe('max5x')
+    expect(Math.abs(fit.s['max5x']! / fit.s['pro']! - 3) < 0.4).toBe(true)
+    expect(fit.inferred).toEqual([])
+    expect(fit.latest).toBe('max5x')
     expect(fit.hits).toBe(3)
     expect(fit.confidence).toBe('high')
     expect((fit.mae ?? 99) < 1.5).toBe(true)
@@ -103,8 +112,9 @@ describe('fit', () => {
 
   test('weighs down a piece another device inflated', () => {
     // One window where the percent ran 40 points ahead of this machine's spend.
+    const back: PlanChoice = { at: nextStart(), plan: 'pro' }
     const polluted = windowOf('pro', 'claude-opus-5-5', times(10, MANY)).map(o => (o.hit ? o : { ...o, y: Math.min(0.99, o.y + 0.4) }))
-    const f2 = fitKind('five_hour', [...data, ...polluted])
+    const f2 = fitKind('five_hour', [...data, ...polluted], [...choices, back])
     expect(f2.outliers >= 1).toBe(true)
     expect(Math.abs(f2.g[2]! / f2.g[1]! - rel(2)) < 0.03).toBe(true)
   })
@@ -127,67 +137,66 @@ describe('fit', () => {
     expect(fittedWindow({ kind: 'seven_day', percentUsed: 10 }, fitKind('seven_day', data), 'pro', {}, {}, 480, NOW)).toBeNull()
   })
 
-  test('plans from the credentials tier', () => {
-    expect(tierPlan({ subscriptionType: 'max', rateLimitTier: 'default_claude_max_20x' })).toBe('max20x')
-    expect(tierPlan({ subscriptionType: 'max', rateLimitTier: 'default_claude_max_5x' })).toBe('max5x')
-    expect(tierPlan({ subscriptionType: 'pro', rateLimitTier: 'default_claude_ai' })).toBe('pro')
-    expect(tierPlan(null)).toBeNull()
-  })
 })
 
-test('a tier change the credentials show joins the timeline; the first tier seen does not', async ($, on) => {
-  const files: Record<string, string> = {
-    'C:/Users/me/.claude/token-almanac/plans.json': JSON.stringify({ plans: [{ from: '2026-10-07', plan: 'pro', source: 'manual' }], detected: null }),
+describe('plans picked and inferred', () => {
+  // A window of mixed work, long-session or many-session by turns, as days go.
+  let turn = 0
+  const worked = (plan: string) => {
+    turn += 1
+    return windowOf(plan, 'claude-opus-5-5', turn % 2 ? [...times(10, LONG), ...times(4, MANY)] : [...times(4, LONG), ...times(8, MANY)])
   }
-  let tier = 'default_claude_max_5x'
-  const scan = (): GlobalScan => ({
-    rows: [],
-    windows: {},
-    observations: [],
-    plans: [{ from: '2026-10-07', plan: 'pro' }],
-    planNow: 'pro',
-    account: { subscriptionType: 'max', rateLimitTier: tier },
-    today: '2026-10-10',
-    tzOffsetMin: 480,
-    files: 0,
-    readBytes: 0,
-    ms: 1,
-    at: NOW,
-  })
-  on('clock.now', () => ({ value: NOW }))
-  on('clock.after', () => ({ value: { cancel: () => undefined } }) as never)
-  on('store.get', () => ({ value: undefined }))
-  on('env.get', ($: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }) as never)
-  // The engine hands paths over in the platform's own spelling.
-  const key = (path: string) => path.replace(/\\/g, '/')
-  on('fs.read', ($: unknown, e: { path: string }) => ({ value: files[key(e.path)] ?? '' }) as never)
-  on('fs.write', ($: unknown, e: { path: string; text: string }) => ((files[key(e.path)] = e.text), { value: undefined }) as never)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify(scan()), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never)
-  on('ui.toast', () => ({ value: undefined }) as never)
-  on('ui.render', ($, e) => {
-    const { Text } = $.ui.resolve(e)
-    return <Text>engine</Text>
-  })
-  const pane = {
-    plugin: 'token-almanac',
-    component: 'Pane' as const,
-    requestId: 'token-almanac',
-    props: { title: 'Token 用量', isFocused: true, bodyColumns: 80, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 80 }, view: {} },
-  }
-  const plansFile = () => JSON.parse(files['C:/Users/me/.claude/token-almanac/plans.json']!) as { plans: { plan: string }[]; detected: string }
+  const run = (plan: string, n: number) => Array.from({ length: n }, () => worked(plan)).flat()
 
-  // The stale max_5x seen first is only the baseline.
-  const p = await $.ui.mount({ ...pane, surface: 'desktop' })
-  await p.press({ key: 'tab-global' })
-  expect(plansFile().detected).toBe('default_claude_max_5x')
-  expect(plansFile().plans.map(x => x.plan)).toEqual(['pro'])
+  test('windows before the first pick whose rate stood apart are a plan of their own, named by its multiple', () => {
+    const before = run('pro', 8)
+    const pick: PlanChoice = { at: nextStart(), plan: 'max5x' }
+    const fit = fitKind('five_hour', [...before, ...run('max5x', 5)], [pick])
+    expect(fit.inferred).toHaveLength(1)
+    const x = fit.inferred[0]!
+    expect([x.against, x.guess, x.windows]).toEqual(['max5x', 'pro', 8])
+    expect(Math.abs(x.ratio - 1 / 3) < 0.08).toBe(true)
+    expect(x.from).toBe(before[0]!.resetsAt - 5 * HOUR)
+    expect(fit.latest).toBe('max5x')
+    expect(fit.windowPlans[String(before[0]!.resetsAt)]).toBe(x.label)
+  })
 
-  // A real change to 20x is recorded from today.
-  tier = 'default_claude_max_20x'
-  await p.press({ key: 'rescan' })
-  expect(plansFile().plans).toEqual([
-    { from: '2026-10-07', plan: 'pro', source: 'manual' },
-    { from: '2026-10-10', plan: 'max20x', source: 'auto', note: 'rateLimitTier=default_claude_max_20x' },
-  ])
-  await p.unmount()
+  test('a pick made after the change: the latest stretch takes the pick, the one before is inferred', () => {
+    const all = [...run('pro', 7), ...run('max5x', 5)]
+    const fit = fitKind('five_hour', all, [{ at: nextStart(), plan: 'max5x' }])
+    expect(fit.inferred.map(x => [x.guess, x.windows])).toEqual([['pro', 7]])
+    expect(fit.latest).toBe('max5x')
+  })
+
+  test('no change, nothing inferred', () => {
+    const fit = fitKind('five_hour', run('pro', 10), [{ at: nextStart(), plan: 'pro' }])
+    expect(fit.inferred).toEqual([])
+    expect(fit.refPlan).toBe('pro')
+    expect(Object.values(fit.windowPlans).every(p => p === 'pro')).toBe(true)
+  })
+
+  test('with no pick the earlier stretch is told against the current plan, unnamed', () => {
+    const fit = fitKind('five_hour', [...run('pro', 6), ...run('max5x', 6)])
+    expect(fit.inferred.map(x => [x.against, x.guess, x.windows])).toEqual([['current', null, 6]])
+    expect(Math.abs(fit.inferred[0]!.ratio - 1 / 3) < 0.08).toBe(true)
+    expect(fit.latest).toBe('current')
+  })
+
+  test('stretches split where the level moves, and only that far', () => {
+    expect(stretchesOf([0, 0.02, -0.01, 0.01, 1.1, 1.08, 1.12], 0.05)).toEqual([
+      [0, 4],
+      [4, 7],
+    ])
+    // A move under 1.8x is the way a window was used, not a plan.
+    expect(stretchesOf([0, 0.01, 0, 0.4, 0.41, 0.39], 0.05)).toEqual([[0, 6]])
+    // Too short a stretch to say.
+    expect(stretchesOf([0, 0, 0, 0, 1.1, 1.1], 0.05)).toEqual([[0, 6]])
+  })
+
+  test('a multiple names the plan sold closest to it, within a factor of 2', () => {
+    expect(guessPlan(1 / 3, 'max5x')).toBe('pro')
+    expect(guessPlan(3.2, 'max5x')).toBe('max20x')
+    expect(guessPlan(1, 'max5x')).toBeNull()
+    expect(guessPlan(0.3, 'team')).toBeNull()
+  })
 })

@@ -21,7 +21,6 @@ const en = {
     enterprise: 'Enterprise',
     current: 'Current plan',
   } as Record<string, string>,
-  sources: { manual: 'manual', auto: 'auto', inferred: 'inferred' } as Record<string, string>,
   confidence: { none: 'no data', low: 'low', medium: 'medium', high: 'high' },
 
   resetsIn: (d: string) => `resets in ${d}`,
@@ -104,16 +103,13 @@ const en = {
   undetermined: 'unclear',
   against: (ref: string) => `Against ${ref}: `,
   multipleNote: (nominal: number | null, n: number) => (nominal !== null ? ` (sold as ×${nominal}, ${n} windows)` : ` (${n} windows)`),
-  plan: 'Plan',
-  delete: 'Delete',
-  emptyTimeline: 'No plan changes recorded: everything counts as the current plan.',
-  planField: 'Plan',
-  dateField: 'From',
-  add: 'Add',
-  badDate: 'token-almanac: write the date as YYYY-MM-DD',
-  planDetected: (p: string) => `token-almanac: plan changed to ${p}, added to the timeline`,
+  planPick: 'Plan',
+  planUnknown: 'Not sure',
+  planHint: 'Pick your plan to have estimates told against it; until then they are relative to whatever plan you are on.',
+  inferredLine: (from: string, to: string, ratio: string, against: string, guess: string | null, n: number) =>
+    `${from} – ${to}: ×${ratio} of ${against}${guess !== null ? `, likely ${guess}` : ''} (inferred, ${n} windows)`,
   dataNote:
-    'From the Claude Code transcripts on this machine (subagents included); claude.ai and other devices are not in them. API-equivalent uses list prices (override in token-almanac/prices.json). Estimates fit pieces of 5 points or more and past limit hits, as model factor × token kind factor and plan multiples. How limits are counted is not published: these are inferences.',
+    'From the Claude Code transcripts on this machine (subagents included); claude.ai and other devices are not in them. API-equivalent uses list prices (override in token-almanac/prices.json). Estimates fit pieces of 5 points or more and past limit hits, as model factor × token kind factor and plan multiples. Before the plan you pick, a stretch whose rate moved by 1.8× or more is taken as another plan. How limits are counted is not published: these are inferences.',
   unpriced: (list: string) => ` Not priced, counted as 0: ${list}.`,
 }
 
@@ -123,7 +119,6 @@ const zh: Messages = {
   kinds: { input: 'input', output: 'output', cacheRead: 'cache 读', cacheWrite: 'cache 写' },
   windows: { five_hour: '5 小时', seven_day: '每周', seven_day_opus: '每周 Opus', seven_day_sonnet: '每周 Sonnet', spend_limit: '花费上限' },
   plans: { pro: 'Pro', max5x: 'Max 5x', max20x: 'Max 20x', team: 'Team', team_premium: 'Team Premium', enterprise: 'Enterprise', current: '当前套餐' },
-  sources: { manual: '手动', auto: '自动', inferred: '推断' },
   confidence: { none: '无数据', low: '低', medium: '中', high: '高' },
 
   resetsIn: d => `${d}后重置`,
@@ -206,16 +201,12 @@ const zh: Messages = {
   undetermined: '未定',
   against: ref => `相对 ${ref}：`,
   multipleNote: (nominal, n) => (nominal !== null ? `（标称 ×${nominal}，${n} 个窗口）` : `（${n} 个窗口）`),
-  plan: '套餐',
-  delete: '删除',
-  emptyTimeline: '时间线为空：全部按当前套餐处理',
-  planField: '套餐',
-  dateField: '生效日期',
-  add: '添加',
-  badDate: 'token-almanac: 日期请写成 YYYY-MM-DD',
-  planDetected: p => `token-almanac: 检测到套餐变为 ${p}，已记入时间线`,
+  planPick: '套餐',
+  planUnknown: '不确定',
+  planHint: '选择你的套餐后，推算会按该套餐给出；未选择时按相对倍数显示。',
+  inferredLine: (from, to, ratio, against, guess, n) => `${from} – ${to}：约为 ${against} 的 ×${ratio}${guess !== null ? `，可能是 ${guess}` : ''}（推测，${n} 个窗口）`,
   dataNote:
-    '数据来自本机的 Claude Code 会话记录（含子代理），不含网页版和其他设备。折算按官方 API 价格（可用 token-almanac/prices.json 覆盖）。推算用每涨 5 个点的分段和历史触限，拟合模型系数 × token 类型系数与套餐倍数；限额的真实算法未公开，结果是推断。',
+    '数据来自本机的 Claude Code 会话记录（含子代理），不含网页版和其他设备。折算按官方 API 价格（可用 token-almanac/prices.json 覆盖）。推算用每涨 5 个点的分段和历史触限，拟合模型系数 × token 类型系数与套餐倍数；所选套餐之前，比率变化 1.8 倍以上的时段视为另一个套餐。限额的真实算法未公开，结果是推断。',
   unpriced: list => ` 未定价、按 0 计：${list}。`,
 }
 

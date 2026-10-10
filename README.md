@@ -13,7 +13,7 @@ A Claude Code mod that shows how much of your plan's usage limits you have used,
 | View | Contents |
 |---|---|
 | This session | Limit meters, cost, tokens, context, turns; token makeup by API-equivalent cost; per-turn chart (subagent turns folded into the turn that started them); per-model split |
-| This machine | Limit meters; capacity estimate per window (API-equivalent dollars a full window holds, what is left, whether it fills before the reset at your usual hourly pace, confidence); past limit hits on the current plan; 30-day or all-time totals; daily chart by model; top projects and models; estimate details and the plan timeline |
+| This machine | Limit meters; capacity estimate per window (API-equivalent dollars a full window holds, what is left, whether it fills before the reset at your usual hourly pace, confidence); your plan, picked from a list; past limit hits on it; 30-day or all-time totals; daily chart by model; top projects and models; estimate details, with any earlier plan inferred from the history |
 
 The UI is in English or Chinese, picked from the `language` option, then Claude Code's `language` setting, then `LC_ALL` / `LANG`, then the system locale. It renders in the terminal, the desktop app, VS Code and mobile.
 
@@ -60,7 +60,8 @@ Claude Code reports each limit only as a percent and a reset time. To turn that 
 - every rise of 5 points or more within a window, and every limit hit (a whole window), is one observation;
 - the fit is `rise × plan multiple ≈ Σ model factor × Σ token-kind factor × API spend`, solved by Levenberg–Marquardt in log parameters with weak priors and Huber reweighting;
 - token-kind factors capture that limits weigh kinds differently from API prices (cache reads count for much less, so one long session lasts longer than many short ones);
-- a plan timeline (`<config>/token-almanac/plans.json`, recorded automatically when the plan tier changes and editable in the pane) lets windows from different plans share one fit, with each plan's multiple fitted rather than taken as sold.
+- you pick your plan in the pane, and each window counts under the plan picked when it began, so windows from different plans share one fit with each plan's multiple fitted rather than taken as sold;
+- windows from before your first pick count under that plan, unless their share per API dollar moved by 1.8× or more for 3 windows or more: such a stretch is fitted as a plan of its own and named after the plan sold at about that multiple (shown as inferred in the estimate details). Changes between plans of about the same size, such as Pro and Team, cannot be told this way.
 
 The pane shows the confidence and the fitted factors. Use from claude.ai or other devices counts in the official percent but not in this machine's transcripts, which makes estimates less certain. How Anthropic counts limits is not published; these figures are inferences.
 
@@ -69,14 +70,14 @@ The pane shows the confidence and the fitted factors. Use from claude.ai or othe
 Everything stays on your machine. Nothing is sent anywhere: the mod makes no network requests, and the program it runs makes none either.
 
 - **Reads** Claude Code's transcripts under `<config>/projects/` to count tokens; message text is parsed only to find turn boundaries and is never stored or sent.
-- **Reads** the `subscriptionType` and `rateLimitTier` fields of `<config>/.credentials.json` to note plan changes. These two fields name the plan tier and are not secrets; no token or other field is read into the mod, kept or sent. On macOS the credentials live in the Keychain, which the mod does not read; edit the timeline in the pane instead.
 - **Reads** Claude Code's `language` setting and the `CLAUDE_CONFIG_DIR`, `HOME`, `USERPROFILE`, `LC_ALL` and `LANG` environment variables.
-- **Writes** two files of its own and nothing else: `<config>/token-almanac/cache.json` (per-file read offsets and 10-minute sums, so later scans read only new lines) and `<config>/token-almanac/plans.json` (the plan timeline). Only token-almanac reads them; they are not settings, instructions or scripts for Claude Code or any other tool. Limit readings go in the plugin's own store.
+- **Writes** no files itself. Its scanner writes one file of its own, `<config>/token-almanac/cache.json` (per-file read offsets and 10-minute sums, so later scans read only new lines), which only token-almanac reads; it is not a setting, instruction or script for Claude Code or any other tool. Limit readings and the plans you pick go in the plugin's own store.
+- **Does not read** Claude Code's credentials or any token: the plan comes from your pick in the pane.
 - **Runs** one program: Node.js (`node`, or the `nodePath` option) on the bundled `scan/scan.mjs`, because transcripts are larger than the mod environment can read. The two command lines are
   - `node <plugin>/scan/scan.mjs session <this session's transcript>`, when a session starts, to count what ran before the mod loaded;
   - `node <plugin>/scan/scan.mjs global <config>/projects <config>/token-almanac/cache.json`, when the machine view opens or refreshes, with the window start times and limit readings on stdin.
 
-  The scanner reads the files above and the plan timeline, writes only `cache.json`, prints token sums as JSON on stdout for the mod, and makes no network requests. Its source is in `scan/scan.mjs`.
+  The scanner reads the transcripts and its own cache, writes only `cache.json`, prints token sums as JSON on stdout for the mod, and makes no network requests. Its source is in `scan/scan.mjs`.
 
 ## Development
 

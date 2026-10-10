@@ -17,9 +17,6 @@ const scanWith = (windowCostTokens: number): GlobalScan => ({
   rows,
   windows: { five_hour: { start: NOW - 2 * HOUR, byModel: { 'claude-opus-5-5': [windowCostTokens, 0, 0, 0, 0] }, byProject: {} } },
   observations: [],
-  plans: [{ from: '2026-08-19', plan: 'pro' }],
-  planNow: 'pro',
-  account: null,
   today: '2026-10-10',
   tzOffsetMin: 480,
   files: 3,
@@ -70,8 +67,7 @@ test('the pane switches to the global view, scans, and changes range', { options
   const store: Record<string, unknown> = {}
   on('store.get', ($: unknown, e: { key: string }) => ({ value: store[e.key] }) as never)
   on('store.set', ($: unknown, e: { key: string; value: unknown }) => ((store[e.key] = e.value), { value: undefined }) as never)
-  on('fs.read', () => ({ value: '{"plans":[],"detected":"default_claude_ai"}' }) as never)
-  on('fs.write', () => ({ value: undefined }) as never)
+  on('fs.read', () => ({ value: '{}' }) as never)
   on('env.get', ($: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }) as never)
   on('process.run', ($: unknown, e: { argv: readonly string[]; init?: { stdin?: string } }) => {
     runs.push({ argv: e.argv, stdin: e.init?.stdin })
@@ -136,7 +132,6 @@ test('the global view leads with what each window holds and has left', { options
     y: 1,
     resetsAt: t + HOUR,
     hit: true,
-    plan: 'pro',
     byModel: { 'claude-opus-5-5': [0, outputTokens, 0, 0, 0] as [number, number, number, number, number] },
   })
   const scan: GlobalScan = {
@@ -149,8 +144,7 @@ test('the global view leads with what each window holds and has left', { options
   const store: Record<string, unknown> = {}
   on('store.get', ($: unknown, e: { key: string }) => ({ value: store[e.key] }) as never)
   on('store.set', ($: unknown, e: { key: string; value: unknown }) => ((store[e.key] = e.value), { value: undefined }) as never)
-  on('fs.read', () => ({ value: '{"plans":[{"from":"2026-08-19","plan":"pro"}],"detected":"default_claude_ai"}' }) as never)
-  on('fs.write', () => ({ value: undefined }) as never)
+  on('fs.read', () => ({ value: '{}' }) as never)
   on('env.get', ($: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }) as never)
   on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify(scan), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never)
   on('session.measure', ($: unknown, e: { changed: string[] }) => ({ changed: e.changed }) as never)
@@ -168,7 +162,12 @@ test('the global view leads with what each window holds and has left', { options
   }
   const first = await $.ui.mount({ ...pane, surface: 'terminal' })
   await first.press({ key: 'tab-global' })
+  // No plan picked yet: the estimates say so and ask for one.
+  await must(first, { text: '不确定 · 按 API 价格折算' })
+  await must(first, { text: /选择你的套餐/ })
+  await first.select({ key: 'plan', value: 'pro' })
   await first.unmount()
+  expect((store.planChoices as { plan: string }[]).map(c => c.plan)).toEqual(['pro'])
   for (const surface of ['terminal', 'desktop'] as const) {
     const p = await $.ui.mount({ ...pane, surface })
     await must(p, { text: '容量推算' })

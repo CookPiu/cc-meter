@@ -1,13 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, SessionUsage } from 'claude-code'
 
-import type { Fit, GlobalScan, Observation, PlanEntry, Reading, Samples, ScanStatus, Snapshot, Tokens, TurnRow, Vec, Window } from '../types'
+import type { Fit, GlobalScan, InferredPlan, Observation, PlanChoice, Reading, Samples, ScanStatus, Snapshot, Tokens, TurnRow, Vec, Window } from '../types'
 
 import { MESSAGES, localeOf } from './i18n'
 import type { Locale, Messages } from './i18n'
 
 const PANE = 'token-almanac'
-// The plan of every reading when no timeline says otherwise.
+// The plan in force when none was ever picked.
 const CURRENT = 'current'
 
 // The words drawn, in the language resolved at load (English until then).
@@ -36,7 +36,7 @@ const range = atom({ plugin: 'token-almanac', key: 'range' } as const, '30d' as 
 const global = atom({ plugin: 'token-almanac', key: 'global' } as const, null as GlobalScan | null)
 const scanStatus = atom({ plugin: 'token-almanac', key: 'scanStatus' } as const, { state: 'idle' } as ScanStatus)
 const fits = atom({ plugin: 'token-almanac', key: 'fits' } as const, {} as Record<string, Fit>)
-const draftPlan = atom({ plugin: 'token-almanac', key: 'draftPlan' } as const, 'pro')
+const planChoices = atom({ plugin: 'token-almanac', key: 'planChoices' } as const, [] as PlanChoice[])
 const details = atom({ plugin: 'token-almanac', key: 'details' } as const, false)
 
 // Kinds of token in the pane's palette: clay for output, its soft tint for cache writes, sand and
@@ -75,7 +75,7 @@ function windowLabel(kind: string): string {
 }
 
 function planLabel(plan: string): string {
-  return t.plans[plan] ?? plan.replace(/^default_claude_/, '').replace(/_/g, ' ')
+  return t.plans[plan] ?? plan.replace(/_/g, ' ')
 }
 
 // True once a reply has come back with no limit readings: an account billed by the API (or a
@@ -293,8 +293,10 @@ const roughUsd = (n: number) => (n >= 10 ? `$${n.toFixed(0)}` : `$${n.toFixed(1)
 // from these and moves them as far as the data says; the sold multiples are not taken as exact.
 // A plan with none (Team, Enterprise, a tier not known here) starts level with the reference.
 const NOMINAL: Record<string, number> = { pro: 1, max5x: 5, max20x: 20 }
-// The plans a timeline entry may name in the pane.
+// The plans the pane offers to pick.
 const PLAN_CHOICES = ['pro', 'max5x', 'max20x', 'team', 'team_premium', 'enterprise'] as const
+// The pick that says the plan is not known.
+const UNKNOWN = 'unknown'
 // How much a start with no sold multiple behind it counts: next to nothing.
 const WEAK_PRIOR = 0.05
 
@@ -366,12 +368,12 @@ export function segmentsOf(kind: string, all: readonly Observation[]): Segment[]
     Object.fromEntries(Object.entries(a).map(([m, c]) => [m, c.map((x, k) => Math.max(0, x - (b[m]?.[k] ?? 0)))]))
   const out: Segment[] = []
   for (const [window, list] of byWindow) {
-    for (const obs of list.filter(o => o.hit)) out.push({ window, plan: obs.plan ?? CURRENT, dy: 1, c: kindsOf(obs.byModel), hit: true })
+    for (const obs of list.filter(o => o.hit)) out.push({ window, plan: CURRENT, dy: 1, c: kindsOf(obs.byModel), hit: true })
     let anchor = { y: 0, c: {} as Record<string, number[]> }
     for (const o of list.filter(o => !o.hit).sort((a, b) => a.t - b.t)) {
       if (o.y - anchor.y < 0.05) continue
       const c = kindsOf(o.byModel)
-      out.push({ window, plan: o.plan ?? CURRENT, dy: o.y - anchor.y, c: minus(c, anchor.c), hit: false })
+      out.push({ window, plan: CURRENT, dy: o.y - anchor.y, c: minus(c, anchor.c), hit: false })
       anchor = { y: o.y, c }
     }
   }
@@ -380,7 +382,8 @@ export function segmentsOf(kind: string, all: readonly Observation[]): Segment[]
 
 // Fits one window kind on its pieces: rise × s[plan] ≈ Σ f[model] × Σ g[kind] × spend[model][kind].
 // g (one per kind of token, shared by every model) is the share of a Pro window one API dollar of
-// that kind of the reference model takes, on the reference plan (the one with the most windows);
+// that kind of the reference model takes, on the reference plan (the one picked now, else the one
+// with the most windows);
 // f scales another model against the reference model (1); s is another plan's window against the
 // reference plan's (1). All are fitted in logs, together (Levenberg–Marquardt). A
 // piece's miss is told against what it can be off by: the limit reports whole percents, so each
@@ -391,10 +394,7 @@ export function segmentsOf(kind: string, all: readonly Observation[]): Segment[]
 // pieces move it as far as they agree to. A piece still off by more
 // than 2.5 of its own spreads once the rest have settled (another device at work, most likely) is
 // weighed down (Huber).
-export function fitKind(kind: string, all: readonly Observation[]): Fit {
-  const none: Fit = { kind, windows: 0, segments: 0, hits: 0, f: {}, g: [0, 0, 0, 0], gBand: [], s: {}, refPlan: CURRENT, planWindows: {}, mae: null, outliers: 0, confidence: 'none', ref: null }
-  const segs = segmentsOf(kind, all)
-  if (segs.length === 0) return none
+function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
 
   const spend = new Map<string, number>()
   for (const sg of segs) for (const [m, c] of Object.entries(sg.c)) spend.set(m, (spend.get(m) ?? 0) + c.reduce((a, b) => a + b, 0))
@@ -403,7 +403,7 @@ export function fitKind(kind: string, all: readonly Observation[]): Fit {
   const others = models.slice(1)
   const planWindows: Record<string, number> = {}
   for (const p of new Set(segs.map(sg => sg.plan))) planWindows[p] = new Set(segs.filter(sg => sg.plan === p).map(sg => sg.window)).size
-  const refPlan = Object.entries(planWindows).sort((a, b) => b[1] - a[1] || (a[0] === 'pro' ? -1 : 1))[0]![0]
+  const refPlan = planWindows[preferRef] !== undefined ? preferRef : Object.entries(planWindows).sort((a, b) => b[1] - a[1] || (a[0] === 'pro' ? -1 : 1))[0]![0]
   const plans = Object.keys(planWindows).filter(p => p !== refPlan)
   const startScale = (pl: string) => (pl === refPlan ? 1 : (nominalRatio(pl, refPlan) ?? 1))
   const priorWeight = (pl: string) => (nominalRatio(pl, refPlan) === null ? WEAK_PRIOR : PRIOR_WINDOWS)
@@ -553,10 +553,178 @@ export function fitKind(kind: string, all: readonly Observation[]): Fit {
     s,
     refPlan,
     planWindows,
+    windowPlans: {},
+    latest: null,
+    inferred: [],
     mae,
     outliers: robust.filter(r => r < 1).length,
     confidence,
     ref,
+  }
+}
+
+// The plan a pick puts in force at a moment; null before any pick, or after "not sure".
+export function planAt(choices: readonly PlanChoice[], t: number): string | null {
+  let plan: string | null = null
+  for (const c of choices) if (c.at <= t) plan = c.plan
+  return plan
+}
+
+// The plan picked last, passing over "not sure".
+export function pickedPlan(choices: readonly PlanChoice[]): string | null {
+  return [...choices].reverse().find(c => c.plan !== null)?.plan ?? null
+}
+
+// A move in share per API dollar this large, between stretches of 3 windows or more, reads as a
+// change of plan: smaller ones are the noise of how a window was used.
+const LOG_JUMP = Math.log(1.8)
+const MIN_STRETCH = 3
+
+// Splits a series into stretches with a level of their own: the cut with the clearest difference
+// of means, while that difference is at least LOG_JUMP and 4 spreads of the means (the spread
+// within the two sides, or the one given if larger), then each half again, three levels deep at
+// most.
+export function stretchesOf(xs: readonly number[], spread: number): [number, number][] {
+  const mean = (a: number, b: number) => xs.slice(a, b).reduce((acc, x) => acc + x, 0) / (b - a)
+  const squares = (a: number, b: number) => {
+    const m = mean(a, b)
+    return xs.slice(a, b).reduce((acc, x) => acc + (x - m) ** 2, 0)
+  }
+  const out: [number, number][] = []
+  const split = (a: number, b: number, depth: number) => {
+    let best = -1
+    let bestZ = 4
+    if (depth < 3) {
+      for (let k = a + MIN_STRETCH; k <= b - MIN_STRETCH; k += 1) {
+        const d = Math.abs(mean(a, k) - mean(k, b))
+        const within = Math.max(spread, Math.sqrt((squares(a, k) + squares(k, b)) / (b - a - 2)))
+        const z = d / (within * Math.sqrt(1 / (k - a) + 1 / (b - k)))
+        if (d >= LOG_JUMP && z >= bestZ) {
+          bestZ = z
+          best = k
+        }
+      }
+    }
+    if (best < 0) {
+      out.push([a, b])
+      return
+    }
+    split(a, best, depth + 1)
+    split(best, b, depth + 1)
+  }
+  if (xs.length > 0) split(0, xs.length, 0)
+  return out
+}
+
+// The plan sold at about this multiple of another, within a factor of 2; null when none is, or
+// when the other is not sold as a multiple.
+export function guessPlan(ratio: number, against: string): string | null {
+  const base = NOMINAL[against]
+  if (base === undefined || !(ratio > 0)) return null
+  let best: string | null = null
+  let miss = Math.LN2
+  for (const [plan, n] of Object.entries(NOMINAL)) {
+    const d = Math.abs(Math.log(ratio) - Math.log(n / base))
+    if (plan !== against && d <= miss) {
+      miss = d
+      best = plan
+    }
+  }
+  return best
+}
+
+// Fits one window kind, with each window counted under the plan picked when it began. Windows no
+// pick covers count under the plan picked next (else the last one picked, else the current plan),
+// unless their share per API dollar stood apart: a first fit gives each window how far its rise
+// strayed from what its spend predicts, and stretches that moved by LOG_JUMP or more from the ones
+// next to the picks are each fitted again as a plan of their own, then named by the sold multiple
+// they come closest to.
+export function fitKind(kind: string, all: readonly Observation[], choices: readonly PlanChoice[] = []): Fit {
+  const none: Fit = {
+    kind, windows: 0, segments: 0, hits: 0, f: {}, g: [0, 0, 0, 0], gBand: [], s: {}, refPlan: CURRENT, planWindows: {},
+    windowPlans: {}, latest: null, inferred: [], mae: null, outliers: 0, confidence: 'none', ref: null,
+  }
+  const raw = segmentsOf(kind, all)
+  if (raw.length === 0) return none
+  const sorted = [...choices].sort((a, b) => a.at - b.at)
+  const length = windowLength(kind) ?? 0
+  const windows = [...new Set(raw.map(sg => sg.window))].sort((a, b) => a - b)
+  const picked = windows.map(w => planAt(sorted, w - length))
+  const preferRef = pickedPlan(sorted) ?? CURRENT
+
+  // Each stretch of windows no pick covers, and the plan it counts under until shown otherwise.
+  const runs: { from: number; to: number; plan: string }[] = []
+  for (let i = 0; i < windows.length; i += 1) {
+    if (picked[i] !== null || (i > 0 && picked[i - 1] === null)) continue
+    let j = i
+    while (j + 1 < windows.length && picked[j + 1] === null) j += 1
+    const next = sorted.find(c => c.at > windows[j]! - length && c.plan !== null)
+    runs.push({ from: i, to: j, plan: next?.plan ?? preferRef })
+  }
+  const labels = picked.map(p => p ?? '')
+  for (const run of runs) for (let i = run.from; i <= run.to; i += 1) labels[i] = run.plan
+  const withLabels = () => {
+    const at = new Map(windows.map((w, i) => [w, labels[i]!]))
+    return raw.map(sg => ({ ...sg, plan: at.get(sg.window)! }))
+  }
+  const first = fitSegments(kind, withLabels(), preferRef)
+
+  // How far each window's rise strayed from its spend, in logs: positive where a dollar took more.
+  const predicted = (fit: Fit, sg: Segment) =>
+    [0, 1, 2, 3].reduce((acc, k) => acc + fit.g[k]! * Object.entries(sg.c).reduce((a, [m, c]) => a + (fit.f[m] ?? 1) * (c[k] ?? 0), 0), 0)
+  const strays = windows.map((w, i) => {
+    const xs = raw
+      .filter(sg => sg.window === w)
+      .map(sg => Math.log((sg.dy * (first.s[labels[i]!] ?? 1)) / predicted(first, sg)))
+      .filter(Number.isFinite)
+    return median(xs)
+  })
+
+  const inferredRuns: { label: string; members: number[]; against: string }[] = []
+  for (const run of runs) {
+    // The run, with the picked windows next to it under the same plan as its anchor.
+    const anchors: number[] = []
+    for (let j = run.to + 1; j < windows.length && picked[j] === run.plan && anchors.length < 12; j += 1) anchors.push(j)
+    if (anchors.length === 0) for (let j = run.from - 1; j >= 0 && picked[j] === run.plan && anchors.length < 12; j -= 1) anchors.unshift(j)
+    const members = [...new Set([...anchors, ...Array.from({ length: run.to - run.from + 1 }, (_, k) => run.from + k)])]
+      .sort((a, b) => a - b)
+      .filter(i => strays[i] !== null)
+    if (members.length < 2 * MIN_STRETCH) continue
+    const xs = members.map(i => strays[i]!)
+    const steps = xs.slice(1).map((x, k) => Math.abs(x - xs[k]!))
+    const spread = Math.max(0.05, (1.4826 * (median(steps) ?? 0)) / Math.SQRT2)
+    const parts = stretchesOf(xs, spread)
+    if (parts.length < 2) continue
+    const level = ([a, b]: [number, number]) => xs.slice(a, b).reduce((acc, x) => acc + x, 0) / (b - a)
+    const home = parts.find(([a, b]) => members.slice(a, b).some(i => anchors.includes(i))) ?? parts[parts.length - 1]!
+    for (const part of parts) {
+      if (part === home || Math.abs(level(part) - level(home)) < LOG_JUMP) continue
+      const own = members.slice(part[0], part[1]).filter(i => !anchors.includes(i))
+      if (own.length === 0) continue
+      const label = `~${inferredRuns.length + 1}`
+      for (const i of own) labels[i] = label
+      inferredRuns.push({ label, members: own, against: run.plan })
+    }
+  }
+
+  const fit = inferredRuns.length === 0 ? first : fitSegments(kind, withLabels(), preferRef)
+  const inferred: InferredPlan[] = inferredRuns.map(({ label, members, against }) => {
+    const ratio = (fit.s[label] ?? 1) / (planScale(fit, against) ?? 1)
+    return {
+      label,
+      from: windows[members[0]!]! - length,
+      to: windows[members[members.length - 1]!]!,
+      windows: members.length,
+      ratio,
+      against,
+      guess: guessPlan(ratio, against),
+    }
+  })
+  return {
+    ...fit,
+    windowPlans: Object.fromEntries(windows.map((w, i) => [String(w), labels[i]!])),
+    latest: labels[labels.length - 1] ?? null,
+    inferred,
   }
 }
 
@@ -631,24 +799,6 @@ export function fittedWindow(
   const atReset = Number.isNaN(reset) || etaMs !== null ? null : Math.min(1, y + used)
   return { plan: plan ?? CURRENT, capacityUsd: usdPerWindow, remainingUsd: left * usdPerWindow, explained, etaMs, atReset }
 }
-
-// A credentials tier as a plan of the timeline.
-export function tierPlan(account: GlobalScan['account']): string | null {
-  const tier = (account?.rateLimitTier ?? '').toLowerCase()
-  const kind = (account?.subscriptionType ?? '').toLowerCase()
-  if (tier.includes('max_20x')) return 'max20x'
-  if (tier.includes('max_5x')) return 'max5x'
-  if (tier.includes('enterprise') || kind === 'enterprise') return 'enterprise'
-  if (tier.includes('team')) return tier.includes('premium') ? 'team_premium' : 'team'
-  if (kind === 'team') return 'team'
-  if (kind === 'pro' || tier.includes('pro')) return 'pro'
-  // A tier this table does not know is a plan of its own, by its own name.
-  return tier !== '' ? tier : kind !== '' ? kind : null
-}
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
-
-type PlanFile = { plans: PlanEntry[]; detected: string | null }
 
 // ---- Engine calls ---------------------------------------------------------
 
@@ -739,12 +889,9 @@ async function scanAll($: EngineInterface): Promise<void> {
     })
     if (run.exitCode !== 0) throw new Error(run.stderr.split('\n')[0] || `scanner exited ${run.exitCode}`)
     const scan = JSON.parse(run.stdout) as GlobalScan
-    const kinds = new Set([...scan.observations.map(o => o.kind), ...(snap?.windows ?? []).map(w => w.kind)])
-    await update($, fits, () => Object.fromEntries([...kinds].map(k => [k, fitKind(k, scan.observations)])))
     await update($, global, () => scan)
+    await refit($)
     await update($, scanStatus, () => ({ state: 'idle' as const }))
-    // A plan change the credentials show re-tags what follows it: scan again for it.
-    if (await notePlanChange($, scan)) $.clock.after(0, () => void scanAll($))
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     // A Node.js that cannot be started is said plainly; the pane words it.
@@ -776,64 +923,29 @@ async function record($: EngineInterface, u: Pick<SessionUsage, 'context' | 'rat
   if (isGrown) await $.store.set('readings', log.slice(-3000))
 }
 
-// The plan timeline file, which the scanner reads to tag each observation with its plan.
-async function planFilePath($: EngineInterface): Promise<string> {
-  return `${await configDir($)}/token-almanac/plans.json`
+// Fits each window kind again, from the last scan and the plans picked.
+async function refit($: EngineInterface): Promise<void> {
+  const scan = await read($, global)
+  if (scan === null) return
+  const snap = await read($, snapshot)
+  const choices = await read($, planChoices)
+  const kinds = new Set([...scan.observations.map(o => o.kind), ...(snap?.windows ?? []).map(w => w.kind)])
+  await update($, fits, () => Object.fromEntries([...kinds].map(k => [k, fitKind(k, scan.observations, choices)])))
 }
 
-async function readPlanFile($: EngineInterface): Promise<PlanFile> {
-  try {
-    const file = JSON.parse(await $.fs.read(await planFilePath($))) as Partial<PlanFile>
-    return { plans: Array.isArray(file.plans) ? file.plans : [], detected: file.detected ?? null }
-  } catch {
-    return { plans: [], detected: null }
-  }
-}
-
-async function writePlanFile($: EngineInterface, file: PlanFile): Promise<void> {
-  const plans = [...file.plans].sort((a, b) => a.from.localeCompare(b.from)).map(({ fromMs, ...rest }) => rest)
-  await $.fs.write(await planFilePath($), `${JSON.stringify({ ...file, plans }, null, 2)}\n`)
-}
-
-// Adds a plan change from the pane, then rescans so observations carry the new tags.
-async function addPlan($: EngineInterface, date: string, plan: string): Promise<void> {
-  const day = date.trim()
-  if (!DATE_RE.test(day) || Number.isNaN(Date.parse(day))) {
-    $.ui.toast(t.badDate)
-    return
-  }
-  const file = await readPlanFile($)
-  file.plans = [...file.plans.filter(p => p.from !== day), { from: day, plan, source: 'manual' }]
-  await writePlanFile($, file)
-  await scanAll($)
-}
-
-async function removePlan($: EngineInterface, from: string): Promise<void> {
-  const file = await readPlanFile($)
-  file.plans = file.plans.filter(p => p.from !== from)
-  await writePlanFile($, file)
-  await scanAll($)
-}
-
-// Records a plan change the credentials show: only a tier that differs from the last one seen
-// (the first one seen is the baseline, stale or not) and from the plan the timeline has now.
-// Answers whether the timeline changed.
-async function notePlanChange($: EngineInterface, scan: GlobalScan): Promise<boolean> {
-  const tier = scan.account?.rateLimitTier ?? null
-  if (tier === null) return false
-  const file = await readPlanFile($)
-  if (tier === file.detected) return false
-  const plan = tierPlan(scan.account)
-  const before = file.detected === null ? null : tierPlan({ subscriptionType: null, rateLimitTier: file.detected })
-  const isChange = file.detected !== null && plan !== null && plan !== (scan.planNow ?? before)
-  if (isChange) {
-    // An empty timeline learns what came before the change, so earlier readings keep their plan.
-    const baseline: PlanEntry[] = file.plans.length === 0 && before !== null ? [{ from: '2000-01-01', plan: before, source: 'auto', note: `rateLimitTier=${file.detected}` }] : []
-    file.plans = [...baseline, ...file.plans.filter(p => p.from !== scan.today), { from: scan.today, plan, source: 'auto', note: `rateLimitTier=${tier}` }]
-    $.ui.toast(t.planDetected(planLabel(plan)))
-  }
-  await writePlanFile($, { ...file, detected: tier })
-  return isChange
+// Picks the plan in force from now on. A pick made less than a day ago is taken as a correction of
+// it, keeping its moment; an earlier one stays, so the windows before now keep the plan they had.
+async function pickPlan($: EngineInterface, value: string): Promise<void> {
+  const plan = value === UNKNOWN ? null : value
+  const now = await $.clock.now()
+  const next = await update($, planChoices, list => {
+    const last = list[list.length - 1]
+    if (last !== undefined && last.plan === plan) return list
+    if (last !== undefined && now - last.at < 24 * HOUR) return [...list.slice(0, -1), { at: last.at, plan }]
+    return list.length === 0 && plan === null ? list : [...list, { at: now, plan }]
+  })
+  await $.store.set('planChoices', next)
+  await refit($)
 }
 
 function ago(ms: number): string {
@@ -1001,6 +1113,8 @@ export const register: Register = (on, options) => {
       Object.entries(stored).filter(([, s]) => !s.resetsAt || Date.parse(s.resetsAt) > now),
     )
     await update($, samples, current => ({ ...live, ...current }))
+    const picks = ((await $.store.get('planChoices')) ?? []) as PlanChoice[]
+    await update($, planChoices, () => picks)
     // The readings log began after the forecast's samples did: start it from them.
     if ((await $.store.get('readings')) === undefined) {
       const seeded: Reading[] = Object.entries(stored).flatMap(([kind, series]) =>
@@ -1211,7 +1325,7 @@ export const register: Register = (on, options) => {
     // trusted outlook wins: the fit where it has enough to go on, else the last 90 minutes' pace.
     const outlookOf = (w: Window) => {
       const fit = fitted[w.kind]
-      const est = scan !== null && g !== null ? fittedWindow(w, fit, scan.planNow, scan.windows[w.kind]?.byModel, g.hourlyByModel, scan.tzOffsetMin, now) : null
+      const est = scan !== null && g !== null ? fittedWindow(w, fit, fit?.latest ?? null, scan.windows[w.kind]?.byModel, g.hourlyByModel, scan.tzOffsetMin, now) : null
       if (est !== null && fit !== undefined && fit.confidence !== 'low') {
         return est.etaMs !== null ? t.fullIn(fmtDuration(est.etaMs)) : est.atReset !== null ? t.atReset((est.atReset * 100).toFixed(0)) : ''
       }
@@ -1375,7 +1489,9 @@ export const register: Register = (on, options) => {
 
     const top = g.byModel.slice(0, 3).map(m => m.model)
     const Form = e.surface === 'mobile' ? null : $.ui.resolve(e)
-    const draft = await read($, draftPlan)
+    const picks = await read($, planChoices)
+    const pickNow = planAt(picks, now)
+    const day = (ms: number) => new Date(ms + scan.tzOffsetMin * MINUTE).toISOString().slice(0, 10)
     const detailView = (
       <Box flexDirection="column" rowGap={1}>
         {Object.values(fitted).map(f => {
@@ -1385,7 +1501,7 @@ export const register: Register = (on, options) => {
           }
           const kindsLine = f.g[1]! > 0 ? [2, 3, 0].map(i => `${kindLabel(i)} ×${(f.g[i]! / f.g[1]!).toFixed(2)} (${band(i)})`).join(' · ') : ''
           const others = Object.entries(f.f).filter(([m]) => m !== f.ref)
-          const multiples = Object.entries(f.planWindows).filter(([p]) => p !== f.refPlan)
+          const multiples = Object.entries(f.planWindows).filter(([p]) => p !== f.refPlan && !p.startsWith('~'))
           return (
             <Box flexDirection="column">
               <Text>
@@ -1415,39 +1531,14 @@ export const register: Register = (on, options) => {
                   {multiples.map(([p, n]) => `${planLabel(p)} ×${(f.s[p] ?? 0).toFixed(1)}${t.multipleNote(nominalRatio(p, f.refPlan), n)}`).join(' · ')}
                 </Text>
               )}
+              {f.inferred.map(x => (
+                <Text dimColor>
+                  {t.inferredLine(day(x.from), day(x.to), x.ratio.toFixed(2), planLabel(x.against), x.guess === null ? null : planLabel(x.guess), x.windows)}
+                </Text>
+              ))}
             </Box>
           )
         })}
-        <Box flexDirection="column">
-          <Text>{t.plan}</Text>
-          {scan.plans.map(p => (
-            <Box flexDirection="row" columnGap={1} alignItems="center">
-              <Box width={11}>
-                <Text dimColor>{p.from}</Text>
-              </Box>
-              <Box width={13}>
-                <Text>{planLabel(p.plan)}</Text>
-              </Box>
-              <Box width={9}>
-                <Text dimColor>{t.sources[p.source ?? 'manual'] ?? p.source}</Text>
-              </Box>
-              <Button key={`del-${p.from}`} label={t.delete} plain dimColor onPress={() => void removePlan($, p.from)} />
-            </Box>
-          ))}
-          {scan.plans.length === 0 && <Text dimColor>{t.emptyTimeline}</Text>}
-          {Form !== null && (
-            <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center">
-              <Form.Select
-                key="plan-new"
-                label={t.planField}
-                value={draft}
-                options={PLAN_CHOICES.map(value => ({ value, label: planLabel(value) }))}
-                onSelect={value => update($, draftPlan, () => value)}
-              />
-              <Form.Input key="date-new" label={t.dateField} placeholder="YYYY-MM-DD" submitLabel={t.add} onSubmit={value => void addPlan($, value, draft)} />
-            </Box>
-          )}
-        </Box>
         <Text dimColor>
           {t.dataNote}
           {g.unpriced.length > 0 ? t.unpriced(g.unpriced.join(', ')) : ''}
@@ -1456,18 +1547,17 @@ export const register: Register = (on, options) => {
     )
 
     // What each window holds and has left in API dollars, how it goes at the usual pace, and the
-    // limit hits on the current plan as a check that needs no fit.
-    const planNow = scan.planNow ?? CURRENT
+    // limit hits under the plan in force now as a check that needs no fit.
     const capacityRows = (snap?.windows ?? []).map(w => {
       const fit = fitted[w.kind]
-      const est = fittedWindow(w, fit, scan.planNow, scan.windows[w.kind]?.byModel, g.hourlyByModel, scan.tzOffsetMin, now)
+      const est = fittedWindow(w, fit, fit?.latest ?? null, scan.windows[w.kind]?.byModel, g.hourlyByModel, scan.tzOffsetMin, now)
       const outlook =
         est === null ? '' : w.percentUsed >= 100 ? t.full : est.etaMs !== null ? t.fullIn(fmtDuration(est.etaMs)) : est.atReset !== null ? t.atReset((est.atReset * 100).toFixed(0)) : ''
       return { w, fit, est, outlook }
     })
     const hits = [...new Set(scan.observations.filter(o => o.hit).map(o => o.kind))].flatMap(kind => {
       const costs = scan.observations
-        .filter(o => o.hit && o.kind === kind && (o.plan ?? CURRENT) === planNow)
+        .filter(o => o.hit && o.kind === kind && fitted[kind]?.windowPlans[String(o.resetsAt)] === fitted[kind]?.latest)
         .map(o => Object.entries(o.byModel).reduce((acc, [m, v]) => acc + costOf(m, v), 0))
         .filter(c => c > 0)
       return costs.length === 0 ? [] : [t.hitsLine(windowLabel(kind), costs.length, roughUsd(Math.min(...costs)), roughUsd(Math.max(...costs)))]
@@ -1476,7 +1566,17 @@ export const register: Register = (on, options) => {
     const capacity =
       capacityRows.length === 0 ? null : (
         <Box flexDirection="column">
-          {section(t.capacity, t.capacityAside(planLabel(planNow)))}
+          {section(t.capacity, t.capacityAside(pickNow === null ? t.planUnknown : planLabel(pickNow)))}
+          {Form !== null && (
+            <Form.Select
+              key="plan"
+              label={t.planPick}
+              value={pickNow ?? UNKNOWN}
+              options={[UNKNOWN, ...PLAN_CHOICES].map(value => ({ value, label: value === UNKNOWN ? t.planUnknown : planLabel(value) }))}
+              onSelect={value => void pickPlan($, value)}
+            />
+          )}
+          {pickNow === null && <Text dimColor>{t.planHint}</Text>}
           {capacityRows.every(r => r.est === null) ? (
             <Text dimColor>{t.capacityNone}</Text>
           ) : (

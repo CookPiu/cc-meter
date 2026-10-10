@@ -95,15 +95,10 @@ test('the global scan reads incrementally and sums windows to the bucket', async
   await fsp.rm(dir, { recursive: true, force: true })
 })
 
-test('limit hits and readings become observations tagged with their plan', async () => {
+test('limit hits and readings become observations; plans and credentials are not read', async () => {
   const dir = await fsp.mkdtemp(join(tmpdir(), 'token-almanac-'))
   const projects = join(dir, 'projects')
   await fsp.mkdir(join(projects, 'p'), { recursive: true })
-  await fsp.mkdir(join(dir, 'token-almanac'), { recursive: true })
-  await fsp.writeFile(
-    join(dir, 'token-almanac', 'plans.json'),
-    JSON.stringify({ plans: [{ from: '2026-08-01', plan: 'pro' }, { from: '2026-09-01', plan: 'max5x' }] }),
-  )
   await fsp.writeFile(join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'secret', subscriptionType: 'max', rateLimitTier: 'default_claude_max_5x' } }))
   const hitAt = '2026-08-20T08:26:00Z'
   const resets = Date.parse('2026-08-20T10:40:00Z')
@@ -130,15 +125,15 @@ test('limit hits and readings become observations tagged with their plan', async
   const reading = [Date.parse('2026-09-05T04:00:00Z'), 'five_hour', 40, Date.parse('2026-09-05T07:00:00Z')]
   const g = await scanGlobal(projects, join(dir, 'cache.json'), {}, Date.parse('2026-09-05T04:00:00Z'), [reading])
 
-  assert.equal(g.planNow, 'max5x')
-  assert.deepEqual(g.account, { subscriptionType: 'max', rateLimitTier: 'default_claude_max_5x' })
+  assert.equal('account' in g || 'planNow' in g || 'plans' in g, false)
   assert.ok(!JSON.stringify(g).includes('secret'))
+  assert.ok(!JSON.stringify(g).includes('max_5x'))
   const hit = g.observations.find(o => o.hit)
-  assert.deepEqual([hit.kind, hit.y, hit.plan, hit.resetsAt], ['five_hour', 1, 'pro', resets])
+  assert.deepEqual([hit.kind, hit.y, hit.resetsAt, 'plan' in hit], ['five_hour', 1, resets, false])
   assert.deepEqual(hit.byModel, { 'claude-opus-5': [0, 1000, 0, 0, 0] })
   assert.equal(g.observations.filter(o => o.hit).length, 1)
   const read = g.observations.find(o => !o.hit)
-  assert.deepEqual([read.y, read.plan, read.exact, read.byModel], [0.4, 'max5x', true, { 'claude-fable-5-1': [0, 50, 0, 0, 0] }])
+  assert.deepEqual([read.y, read.exact, read.byModel], [0.4, true, { 'claude-fable-5-1': [0, 50, 0, 0, 0] }])
   // The August hit lies before the responses kept one by one: summed to the bucket.
   assert.equal(hit.exact, false)
 
