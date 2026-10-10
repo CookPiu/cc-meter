@@ -861,8 +861,9 @@ async function loadPriceOverrides($: EngineInterface): Promise<void> {
   }
 }
 
-// Whether a scan is in flight, so no second one starts beside it; what the last one read, so a pick fits again without reading the transcripts; and the fits of the last
-// observations and picks, kept while neither changes.
+// Whether a scan is in flight, so no second one starts beside it; what the last one read, so a
+// pick fits again without reading the transcripts; and the fits of the last observations and
+// picks, kept while neither changes.
 let isScanning = false
 let lastScan: GlobalScan | null = null
 let fitMemo: { key: string; fits: Record<string, Fit> } | null = null
