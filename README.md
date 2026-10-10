@@ -21,13 +21,20 @@ The UI is in English or Chinese, picked from the `language` option, then Claude 
 
 Requires Claude Code 2.1.287 or later (mods support). The machine view needs Node.js 18 or later on `PATH`, or set its path in the `nodePath` option.
 
-In a terminal session:
+In a Claude Code session, add this repository as a marketplace, then install from it:
 
 ```
-/plugin install cc-meter --marketplace CookPiu/cc-meter
+/plugin marketplace add CookPiu/cc-meter
+/plugin install cc-meter@cc-meter
 ```
 
-Answer `y` to add the marketplace and choose a scope. Installed at user scope, it also loads in sessions the desktop app starts.
+Or from a shell, in one step:
+
+```
+claude plugin install cc-meter --marketplace CookPiu/cc-meter
+```
+
+Installed at user scope (the default), it also loads in sessions the desktop app starts. Run `/plugin marketplace update cc-meter` to pick up new versions.
 
 ## Options
 

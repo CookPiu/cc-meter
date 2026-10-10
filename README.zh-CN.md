@@ -21,13 +21,20 @@ Claude Code mod：显示套餐用量限额已用多少、何时重置、剩余�
 
 需要 Claude Code 2.1.287 或更高版本（支持 mod）。本机全局视图需要 `PATH` 上有 Node.js 18 以上，或在 `nodePath` 选项里填写路径。
 
-在终端会话中输入：
+在 Claude Code 会话中，先把本仓库添加为市场，再从中安装：
 
 ```
-/plugin install cc-meter --marketplace CookPiu/cc-meter
+/plugin marketplace add CookPiu/cc-meter
+/plugin install cc-meter@cc-meter
 ```
 
-按 `y` 添加市场并选择作用域。装在 user 作用域后，桌面应用启动的会话也会加载。
+或者在系统终端一步完成：
+
+```
+claude plugin install cc-meter --marketplace CookPiu/cc-meter
+```
+
+装在 user 作用域（默认）后，桌面应用启动的会话也会加载。之后用 `/plugin marketplace update cc-meter` 获取新版本。
 
 ## 选项
 
