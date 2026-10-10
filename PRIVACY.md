@@ -16,7 +16,7 @@ It does not read Claude Code's credentials, API keys or any token. Your plan com
 ## What it keeps
 
 - `<config>/token-almanac/cache.json`, written by its bundled scanner: per-file read offsets and token sums in 10-minute buckets, so later scans read only new lines. No message text is in it.
-- In the plugin's own store in Claude Code: limit readings (time, window, percent, reset time) and the plans you picked.
+- In the plugin's own store in Claude Code: limit readings (time, window, percent, reset time), the plans you picked, and a history of windows that have reset (for each, a reading every 5 points with the tokens each model had used in that window by then).
 
 All of it stays on your machine. To remove it, uninstall the plugin and delete `<config>/token-almanac/`.
 
@@ -48,7 +48,7 @@ token-almanac 是完全在本机运行的 Claude Code mod。它不收集任何�
 ## 保存的内容
 
 - `<config>/token-almanac/cache.json`，由插件自带的扫描程序写入：各文件的读取偏移和按 10 分钟汇总的 token 数，之后只读新增内容。其中不含任何消息文本。
-- Claude Code 中插件自己的存储：限额读数（时间、窗口、百分比、重置时间）和你选择的套餐。
+- Claude Code 中插件自己的存储：限额读数（时间、窗口、百分比、重置时间）、你选择的套餐，以及已重置窗口的历史（每个窗口每涨 5 个点一条读数，附当时各模型在该窗口内已用的 token 数）。
 
 这些数据都只留在本机。要删除它们，卸载插件并删除 `<config>/token-almanac/` 目录即可。
 

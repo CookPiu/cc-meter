@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { costOf, fitKind, fittedWindow, guessPlan, segmentsOf, shareOf, spendByKind, stretchesOf } from '../hooks/register'
+import { compactWindow, costOf, fitKind, fittedWindow, guessPlan, segmentsOf, shareOf, spendByKind, stretchesOf } from '../hooks/register'
 import type { Observation, PlanChoice, Vec } from '../types'
 
 const M = 1_000_000
@@ -26,14 +26,15 @@ const add = (a: Vec, b: Vec): Vec => a.map((x, i) => x + b[i]!) as Vec
 let clock = 0
 // One window worked in the given steps, read after each (percent rounded, as the limit reports
 // it); a window that reaches 100% ends in a hit instead.
-function windowOf(plan: string, model: string, steps: Vec[]): Observation[] {
+// With `extra`, that much use this machine never sees joins the window from step `from` on.
+function windowOf(plan: string, model: string, steps: Vec[], extra = 0, from = 0): Observation[] {
   clock += 10 * HOUR
   const resetsAt = clock + 5 * HOUR
   let v: Vec = [0, 0, 0, 0, 0]
   const out: Observation[] = []
   steps.forEach((step, i) => {
     v = add(v, step)
-    const share = trueShare(plan, model, v)
+    const share = trueShare(plan, model, v) + (i >= from ? extra : 0)
     const t = clock + i * 60_000
     if (share >= 1) {
       if (!out.some(o => o.hit)) out.push({ t, kind: 'five_hour', y: 1, resetsAt, hit: true, byModel: { [model]: v } })
@@ -67,6 +68,26 @@ const choices: PlanChoice[] = [
 ]
 data.push(...windowOf('max5x', 'claude-opus-5-5', times(60, MANY)), ...windowOf('max5x', 'claude-opus-5-5', times(150, LONG)))
 
+// One weekly window worked in the given steps on Pro, its percents rounded; g is the truth it is
+// counted by, cap how many Pro five-hour windows' worth it holds.
+function weekOf(model: string, steps: Vec[], g: number[], cap: number): Observation[] {
+  clock += 8 * 24 * HOUR
+  const resetsAt = clock + 7 * 24 * HOUR
+  let v: Vec = [0, 0, 0, 0, 0]
+  const out: Observation[] = []
+  steps.forEach((step, i) => {
+    v = add(v, step)
+    const share = (F[model]! * spendByKind(model, v).reduce((a, x, k) => a + g[k]! * x, 0)) / cap
+    if (share < 1) out.push({ t: clock + i * 60_000, kind: 'seven_day', y: Math.round(share * 100) / 100, resetsAt, hit: false, byModel: { [model]: v } })
+  })
+  return out
+}
+// How far a fit's share of a spend is from the truth's, as a fraction of the truth.
+const missOf = (f: ReturnType<typeof fitKind>, g: number[], cap: number, v: Vec) => {
+  const truth = (F['claude-opus-5-5']! * spendByKind('claude-opus-5-5', v).reduce((a, x, k) => a + g[k]! * x, 0)) / cap
+  return Math.abs(shareOf(f, 'current', { 'claude-opus-5-5': v }) / truth - 1)
+}
+
 describe('fit', () => {
   const fit = fitKind('five_hour', data, choices)
   const rel = (k: number) => fit.g[k]! / fit.g[1]!
@@ -74,7 +95,8 @@ describe('fit', () => {
   test('learns that cache reads count far less, and cache writes more, than API prices say', () => {
     // Opus 5's limit runs spend the most API dollars: it is the reference, Opus 5.5 counts 1/0.6.
     expect(fit.ref).toBe('claude-opus-5')
-    expect(rel(2) > 0.03 && rel(2) < 0.08).toBe(true)
+    // Within 15% of the truth: the kinds' pull toward each other no longer drags it a third heavy.
+    expect(Math.abs(rel(2) / 0.05 - 1) < 0.15).toBe(true)
     expect(rel(3) > 1.05 && rel(3) < 1.35).toBe(true)
     expect(Math.abs(fit.f['claude-opus-5-5']! - 1 / 0.6) < 0.15).toBe(true)
     // The band holds the truth and is narrow enough to say something.
@@ -110,13 +132,76 @@ describe('fit', () => {
     expect(segs.filter(sg => sg.hit).every(sg => sg.dy === 1)).toBe(true)
   })
 
+  test('a weekly window with a few pieces leans on the five-hour fit, and one with its own evidence does not', () => {
+    const long: Vec = LONG.map(x => x * 30) as Vec
+    const many: Vec = MANY.map(x => x * 30) as Vec
+    // Counted as the five-hour window is: one week of mixed use, four or so pieces.
+    const thin = weekOf('claude-opus-5-5', [...times(80, LONG), ...times(20, MANY)], G, 8)
+    const alone = fitKind('seven_day', thin)
+    const leaning = fitKind('seven_day', thin, [], fit)
+    // A way of use the week has not seen (long answers) is told right only by leaning.
+    const write: Vec = WRITE.map(x => x * 30) as Vec
+    expect(alone.segments <= 4).toBe(true)
+    expect([alone.lent, leaning.lent]).toEqual([null, 'five_hour'])
+    expect(missOf(alone, G, 8, write) > 0.3).toBe(true)
+    for (const v of [long, many, write]) expect(missOf(leaning, G, 8, v) < 0.08).toBe(true)
+    // A week of one way of use alone: the others are guesses without the five-hour fit.
+    const one = weekOf('claude-opus-5-5', times(120, LONG), G, 8)
+    const oneAlone = fitKind('seven_day', one)
+    const oneLeaning = fitKind('seven_day', one, [], fit)
+    expect(missOf(oneAlone, G, 8, many) > 0.3).toBe(true)
+    for (const v of [long, many, write]) expect(missOf(oneLeaning, G, 8, v) < 0.1).toBe(true)
+    // Counted otherwise: cache reads weigh four times as much, over six weeks of varied use.
+    const G2 = [G[0]!, G[1]!, G[2]! * 4, G[3]!]
+    const rich = [
+      ...weekOf('claude-opus-5-5', times(200, LONG), G2, 8),
+      ...weekOf('claude-opus-5-5', times(60, MANY), G2, 8),
+      ...weekOf('claude-opus-5-5', [...times(100, LONG), ...times(30, MANY)], G2, 8),
+      ...weekOf('claude-opus-5-5', times(60, WRITE), G2, 8),
+      ...weekOf('claude-opus-5-5', [...times(40, WRITE), ...times(100, LONG)], G2, 8),
+      ...weekOf('claude-opus-5-5', [...times(30, MANY), ...times(40, WRITE)], G2, 8),
+    ]
+    // With its own evidence it follows that, not the five-hour fit's way of counting.
+    const lent = fitKind('seven_day', rich, [], fit)
+    for (const v of [long, many]) expect(missOf(lent, G2, 8, v) < 0.05).toBe(true)
+  })
+
+  test('a window cut down for the history makes the same pieces, from far fewer observations', () => {
+    const byWindow = new Map<number, Observation[]>()
+    for (const o of data) byWindow.set(o.resetsAt, [...(byWindow.get(o.resetsAt) ?? []), o])
+    let kept = 0
+    for (const list of byWindow.values()) {
+      const cut = compactWindow(list)
+      kept += cut.length
+      expect(segmentsOf('five_hour', cut)).toEqual(segmentsOf('five_hour', list))
+    }
+    expect(kept * 3 < data.length).toBe(true)
+  })
+
   test('weighs down a piece another device inflated', () => {
     // One window where the percent ran 40 points ahead of this machine's spend.
     const back: PlanChoice = { at: nextStart(), plan: 'pro' }
     const polluted = windowOf('pro', 'claude-opus-5-5', times(10, MANY)).map(o => (o.hit ? o : { ...o, y: Math.min(0.99, o.y + 0.4) }))
     const f2 = fitKind('five_hour', [...data, ...polluted], [...choices, back])
-    expect(f2.outliers >= 1).toBe(true)
+    // Use this machine did not see only adds to a rise: that piece is set aside as such.
+    expect((f2.unseen ?? 0) >= 1).toBe(true)
+    expect(f2.unseen ?? 0).toBeLessThanOrEqual(2)
     expect(Math.abs(f2.g[2]! / f2.g[1]! - rel(2)) < 0.03).toBe(true)
+  })
+
+  test('sets aside the pieces a few points of use from elsewhere lifted, so shares stay true', () => {
+    // Three more Pro windows, each with 3 points of web use partway through.
+    const back: PlanChoice = { at: nextStart(), plan: 'pro' }
+    const elsewhere = [
+      ...windowOf('pro', 'claude-opus-5-5', [...times(20, LONG), ...times(6, MANY)], 0.03, 9),
+      ...windowOf('pro', 'claude-opus-5-5', [...times(10, WRITE), ...times(12, LONG)], 0.03, 14),
+      ...windowOf('pro', 'claude-opus-5-5', [...times(6, MANY), ...times(20, LONG)], 0.03, 4),
+    ]
+    const f2 = fitKind('five_hour', [...data, ...elsewhere], [...choices, back])
+    const misses = [LONG.map(x => x * 10), MANY.map(x => x * 3), WRITE.map(x => x * 3)].map(v => shareOf(f2, 'pro', { 'claude-opus-5-5': v as Vec }) / trueShare('pro', 'claude-opus-5-5', v as Vec) - 1)
+    // Weighing those pieces down only (Huber) left the long-session share 1.2% heavy.
+    expect(f2.unseen ?? 0).toBeGreaterThanOrEqual(2)
+    for (const miss of misses) expect(Math.abs(miss) < 0.01).toBe(true)
   })
 
   test('tells dollars at this window\'s own way of use, and walks the hours ahead', () => {

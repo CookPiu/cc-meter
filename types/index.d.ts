@@ -64,9 +64,13 @@ export type Fit = {
   // Median miss, in percentage points; pieces weighed down as unexplained.
   mae: number | null
   outliers: number
+  // Pieces that rose far past their spend, set aside as use this machine did not see.
+  unseen?: number
   confidence: 'none' | 'low' | 'medium' | 'high'
   // The model with the most spend.
   ref: string | null
+  // The window kind whose fit this one leaned on for its kinds' and models' weights, if any.
+  lent?: string | null
 }
 
 // A stretch of windows with no pick behind it whose share per API dollar moved apart from the

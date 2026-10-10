@@ -300,6 +300,24 @@ function planScale(fit: Fit, plan: string): number | null {
 }
 // How many windows' worth of evidence the starting values (API prices, sold multiples) count as.
 const PRIOR_WINDOWS = 0.5
+// The pull of the kinds' weights toward each other, far weaker: a kind the pieces barely tell apart
+// (cache reads, a small share of every piece's weighted spend) was dragged toward the rest, about a
+// third too heavy on test data drawn from known weights; at this pull it is within a tenth, and its
+// band still widens to "unclear" where the pieces cannot say.
+const KIND_PRIOR = 0.05
+// How many windows' worth a longer window kind's fit leans on the five-hour fit's way of weighing
+// kinds and models, when that fit is at least of medium confidence: enough to steady a kind with
+// a few pieces, little enough that a kind with its own evidence goes its own way.
+const BORROW_WINDOWS = 2
+// How many of its own spreads a piece may rise past what its spend says before it is taken for
+// use this machine did not see and set aside. On test data with a few points of such use in three
+// windows in eleven, weighing those pieces down (Huber) left shares about 5% heavy; setting them
+// aside past 2 spreads leaves about 1.5%, with no piece of the clean data set aside, where past
+// 1.5 spreads starts setting clean pieces aside too.
+const UNSEEN_AT = 2
+// Below this many pieces there is no rest to tell a piece apart from (two limit hits a third
+// apart say nothing of which one had help): such fits only weigh down.
+const UNSEEN_MIN_PIECES = 6
 
 // Gaussian elimination with partial pivoting; null when the system is singular.
 function solve(a: number[][], b: number[]): number[] | null {
@@ -367,6 +385,20 @@ export function segmentsOf(kind: string, all: readonly Observation[]): Segment[]
   return out.filter(s => Object.values(s.c).some(c => c.some(x => x > 0)))
 }
 
+// One window's observations cut down to those segmentsOf closes a piece on: each reading 5 points
+// or more past the last one kept, and the window's first hit. The pieces they make are the same.
+export function compactWindow(obs: readonly Observation[]): Observation[] {
+  const kept: Observation[] = []
+  let last = 0
+  for (const o of obs.filter(o => !o.hit).sort((a, b) => a.t - b.t)) {
+    if (o.y - last < 0.05) continue
+    kept.push(o)
+    last = o.y
+  }
+  const hit = obs.filter(o => o.hit).sort((a, b) => a.t - b.t)[0]
+  return hit === undefined ? kept : [...kept, hit]
+}
+
 // Fits one window kind on its pieces: rise × s[plan] ≈ Σ f[model] × Σ g[kind] × spend[model][kind].
 // g (one per kind of token, shared by every model) is the share of a Pro window one API dollar of
 // that kind of the reference model takes, on the reference plan (the one picked now, else the one
@@ -377,11 +409,13 @@ export function segmentsOf(kind: string, all: readonly Observation[]): Segment[]
 // end of a piece may be half a point off (ROUNDING), and use the transcripts do not see adds a
 // share of the rise (SPREAD). Each parameter starts where API prices and sold multiples put it
 // (the kinds' g equal, f at 1, s at the sold ratio where both plans have one, else at 1), that
-// start weighing as much as half a piece (PRIOR_WINDOWS, or WEAK_PRIOR with no sold ratio), so the
-// pieces move it as far as they agree to. A piece still off by more
-// than 2.5 of its own spreads once the rest have settled (another device at work, most likely) is
-// weighed down (Huber).
-function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
+// start weighing as much as half a piece (PRIOR_WINDOWS, or WEAK_PRIOR with no sold ratio; the
+// kinds' g far less, KIND_PRIOR), so the
+// pieces move it as far as they agree to. Once the rest have settled, a piece that rose more than
+// UNSEEN_AT of its own spreads past what its spend says is set aside: use this machine did not see
+// (another device, the web app) only ever adds to a rise. A piece off the other way by more than
+// 2.5 spreads, which no unseen use explains, is weighed down (Huber).
+function fitSegments(kind: string, segs: Segment[], preferRef: string, borrow: Fit | null = null): Fit {
 
   const spend = new Map<string, number>()
   for (const sg of segs) for (const [m, c] of Object.entries(sg.c)) spend.set(m, (spend.get(m) ?? 0) + c.reduce((a, b) => a + b, 0))
@@ -394,6 +428,19 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
   const plans = Object.keys(planWindows).filter(p => p !== refPlan)
   const startScale = (pl: string) => (pl === refPlan ? 1 : (nominalRatio(pl, refPlan) ?? 1))
   const priorWeight = (pl: string) => (nominalRatio(pl, refPlan) === null ? WEAK_PRIOR : PRIOR_WINDOWS)
+  // Another window kind's fit to start from: its kinds' weights as a shape (logs about their mean),
+  // and its models against this fit's reference model where it has that one. The size of the
+  // window is never lent: it is this kind's own.
+  const lent =
+    borrow === null || !borrow.g.every(x => x > 0)
+      ? null
+      : (() => {
+          const logs = borrow.g.map(Math.log)
+          const mean = logs.reduce((a, b) => a + b, 0) / logs.length
+          const base = borrow.f[ref]
+          const f: Record<string, number> = base === undefined ? {} : Object.fromEntries(Object.entries(borrow.f).map(([m, x]) => [m, Math.log(x / base)]))
+          return { g: logs.map(x => x - mean), f }
+        })()
 
   // Parameters, in logs: g[0..3], then f of each other model, then s of each other plan.
   const nG = 4
@@ -417,7 +464,10 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
     f: { [ref]: 1, ...Object.fromEntries(others.map((m, i) => [m, Math.exp(q[nG + i]!)])) } as Record<string, number>,
     s: { [refPlan]: 1, ...Object.fromEntries(plans.map((pl, i) => [pl, Math.exp(q[nG + nF + i]!)])) } as Record<string, number>,
   })
-  const base = segs.map(sg => (sg.hit ? 2 : 1))
+  // A hit is the whole window, exact at 100%: it counts double, unless the window's readings already
+  // cut it into pieces, which say the same spend again.
+  const read = new Set(segs.filter(sg => !sg.hit).map(sg => sg.window))
+  const base = segs.map(sg => (sg.hit && !read.has(sg.window) ? 2 : 1))
   let robust = segs.map(() => 1)
   const ROUNDING = 0.006
   const SPREAD = 0.1
@@ -449,12 +499,13 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
     for (let k = 0; k < nG; k += 1) {
       const j = new Array<number>(n).fill(0)
       for (let c = 0; c < nG; c += 1) j[c] = (c === k ? 1 : 0) - 1 / nG
-      rows.push({ r: q[k]! - meanG, j, w: PRIOR_WINDOWS })
+      rows.push(lent === null ? { r: q[k]! - meanG, j, w: KIND_PRIOR } : { r: q[k]! - meanG - lent.g[k]!, j, w: BORROW_WINDOWS })
     }
     for (let i = 0; i < nF; i += 1) {
       const j = new Array<number>(n).fill(0)
       j[nG + i] = 1
-      rows.push({ r: q[nG + i]!, j, w: PRIOR_WINDOWS })
+      const at = lent?.f[others[i]!]
+      rows.push(at === undefined ? { r: q[nG + i]!, j, w: PRIOR_WINDOWS } : { r: q[nG + i]! - at, j, w: BORROW_WINDOWS })
     }
     plans.forEach((pl, i) => {
       const j = new Array<number>(n).fill(0)
@@ -465,7 +516,11 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
   }
   const sumSquares = (rows: { r: number; w: number }[]) => rows.reduce((acc, row) => acc + row.w * row.r * row.r, 0)
 
+  // Weighs down the pieces the rest cannot explain: three times, each once the fit has settled or
+  // had 30 rounds, whichever comes first, so a fit that settles fast is weighed all the same.
   let mu = 1e-3
+  let reweighs = 0
+  let since = 0
   for (let iter = 0; iter < 200; iter += 1) {
     const rows = system(p)
     const a = Array.from({ length: n }, () => new Array<number>(n).fill(0))
@@ -480,24 +535,33 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
     const step = solve(a, b)
     if (step === null) break
     const next = p.map((v, i) => v + Math.max(-2, Math.min(2, step[i]!)))
+    let isSettled = false
     if (sumSquares(system(next, false)) < sumSquares(rows)) {
       p = next
       mu = Math.max(1e-9, mu / 3)
-      if (Math.max(...step.map(Math.abs)) < 1e-7) break
+      isSettled = Math.max(...step.map(Math.abs)) < 1e-7
     } else {
       mu *= 4
-      if (mu > 1e9) break
+      isSettled = mu > 1e9
     }
-    // Weigh down the pieces the rest cannot explain, once the fit has had some rounds.
-    if (iter === 30 || iter === 60 || iter === 90) {
+    since += 1
+    if (isSettled || since >= 30) {
+      if (reweighs === 3) {
+        if (isSettled) break
+        continue
+      }
       robust = system(p, false)
         .slice(0, segs.length)
-        .map(row => (Math.abs(row.r) <= 2.5 ? 1 : 2.5 / Math.abs(row.r)))
+        .map(row => (row.r < -UNSEEN_AT && segs.length >= UNSEEN_MIN_PIECES ? 0.01 : Math.abs(row.r) <= 2.5 ? 1 : 2.5 / Math.abs(row.r)))
+      reweighs += 1
+      since = 0
       mu = 1e-3
     }
   }
 
   const { g, f, s } = unpack(p)
+  // The pieces set aside as unseen use, and the rest weighed down.
+  const unseen = robust.filter(w => w === 0.01).length
 
   // 95% bands for each kind's weight against output's, from the curvature at the fit: wide where
   // the pieces cannot tell two kinds apart (they always came together in the same proportion).
@@ -549,9 +613,11 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string): Fit {
     latest: null,
     inferred: [],
     mae,
-    outliers: robust.filter(r => r < 1).length,
+    outliers: robust.filter(r => r < 1).length - unseen,
+    unseen,
     confidence,
     ref,
+    lent: lent === null ? null : (borrow?.kind ?? null),
   }
 }
 
@@ -631,7 +697,7 @@ export function guessPlan(ratio: number, against: string): string | null {
 // strayed from what its spend predicts, and stretches that moved by LOG_JUMP or more from the ones
 // next to the picks are each fitted again as a plan of their own, then named by the sold multiple
 // they come closest to.
-export function fitKind(kind: string, all: readonly Observation[], choices: readonly PlanChoice[] = []): Fit {
+export function fitKind(kind: string, all: readonly Observation[], choices: readonly PlanChoice[] = [], borrow: Fit | null = null): Fit {
   const none: Fit = {
     kind, windows: 0, segments: 0, hits: 0, f: {}, g: [0, 0, 0, 0], gBand: [], s: {}, refPlan: CURRENT, planWindows: {},
     windowPlans: {}, latest: null, inferred: [], mae: null, outliers: 0, confidence: 'none', ref: null,
@@ -659,7 +725,7 @@ export function fitKind(kind: string, all: readonly Observation[], choices: read
     const at = new Map(windows.map((w, i) => [w, labels[i]!]))
     return raw.map(sg => ({ ...sg, plan: at.get(sg.window)! }))
   }
-  const first = fitSegments(kind, withLabels(), preferRef)
+  const first = fitSegments(kind, withLabels(), preferRef, borrow)
 
   // How far each window's rise strayed from its spend, in logs: positive where a dollar took more.
   const predicted = (fit: Fit, sg: Segment) =>
@@ -699,7 +765,7 @@ export function fitKind(kind: string, all: readonly Observation[], choices: read
     }
   }
 
-  const fit = inferredRuns.length === 0 ? first : fitSegments(kind, withLabels(), preferRef)
+  const fit = inferredRuns.length === 0 ? first : fitSegments(kind, withLabels(), preferRef, borrow)
   const inferred: InferredPlan[] = inferredRuns.map(({ label, members, against }) => {
     const ratio = (fit.s[label] ?? 1) / (planScale(fit, against) ?? 1)
     return {
@@ -868,6 +934,39 @@ let isScanning = false
 let lastScan: GlobalScan | null = null
 let fitMemo: { key: string; fits: Record<string, Fit> } | null = null
 
+// The history of windows that have reset, kept for good in the store: each window's observations
+// cut down to those the fit reads, with spend exact to the response. Readings stay in their log
+// only while their window runs, so its cap holds open windows, and a window's pieces keep their
+// spend however old they grow (the scanner keeps spend response by response for 8 days only).
+const ARCHIVE_MAX = 20_000
+const windowKey = (o: { kind: string; resetsAt: number }) => `${o.kind}|${o.resetsAt}`
+// When this process last looked for windows to put into the history.
+let archiveCheckedAt = 0
+
+// Puts each window that has reset, has readings and still has exact spend into the history, and
+// takes its readings out of the log. A window whose spend is no longer exact is left as it is:
+// archiving it would keep its error for good. Returns the whole history.
+async function archiveClosed($: EngineInterface, scan: GlobalScan, now: number): Promise<Observation[]> {
+  const archive = ((await $.store.get('archive')) ?? []) as Observation[]
+  const known = new Set(archive.map(windowKey))
+  const byWindow = new Map<string, Observation[]>()
+  for (const o of scan.observations) {
+    const key = windowKey(o)
+    if (!known.has(key)) byWindow.set(key, [...(byWindow.get(key) ?? []), o])
+  }
+  const fresh = [...byWindow.values()]
+    .filter(list => list[0]!.resetsAt <= now && list.some(o => !o.hit) && list.every(o => o.exact === true))
+    .flatMap(compactWindow)
+  if (fresh.length === 0) return archive
+  const next = [...archive, ...fresh].sort((a, b) => a.resetsAt - b.resetsAt || a.t - b.t).slice(-ARCHIVE_MAX)
+  await $.store.set('archive', next)
+  const done = new Set(next.map(windowKey))
+  const log = ((await $.store.get('readings')) ?? []) as Reading[]
+  const open = log.filter(r => !done.has(windowKey({ kind: r[1], resetsAt: r[3] })))
+  if (open.length !== log.length) await $.store.set('readings', open)
+  return next
+}
+
 // A scan the user asked for says so while it runs. One in the background (after a turn, on opening
 // the view) keeps the figures shown until the new ones replace them, all in one change.
 async function scanAll($: EngineInterface, isShown = false): Promise<void> {
@@ -886,13 +985,19 @@ async function scanAll($: EngineInterface, isShown = false): Promise<void> {
         return length === null || Number.isNaN(reset) ? [] : [[w.kind, reset - length]]
       }),
     )
-    const readings = ((await $.store.get('readings')) ?? []) as Reading[]
+    const kept = new Set((((await $.store.get('archive')) ?? []) as Observation[]).map(windowKey))
+    const readings = (((await $.store.get('readings')) ?? []) as Reading[]).filter(r => !kept.has(windowKey({ kind: r[1], resetsAt: r[3] })))
     const run = await $.process.run([nodeBin, `${$.plugin.root}/scan/scan.mjs`, 'global', `${config}/projects`, `${config}/token-almanac/cache.json`], {
       timeoutMs: 300_000,
       stdin: JSON.stringify({ windows, readings }),
     })
     if (run.exitCode !== 0) throw new Error(run.stderr.split('\n')[0] || `scanner exited ${run.exitCode}`)
-    lastScan = JSON.parse(run.stdout) as GlobalScan
+    const scan = JSON.parse(run.stdout) as GlobalScan
+    // The fit reads the history and the scan's windows not in it (a hit the scanner keeps is there).
+    const archive = await archiveClosed($, scan, await $.clock.now())
+    archiveCheckedAt = await $.clock.now()
+    const archived = new Set(archive.map(windowKey))
+    lastScan = { ...scan, observations: [...archive, ...scan.observations.filter(o => !archived.has(windowKey(o)))] }
     await refit($)
     if ((await read($, scanStatus)).state !== 'idle') await update($, scanStatus, () => ({ state: 'idle' as const }))
   } catch (error) {
@@ -917,10 +1022,12 @@ async function refit($: EngineInterface): Promise<void> {
   const key = JSON.stringify([scan.observations.length, scan.observations.reduce((a, o) => Math.max(a, o.t), 0), choices, kinds])
   let fits = fitMemo?.key === key ? fitMemo.fits : null
   if (fits === null) {
+    // The five-hour window first: the others lean on it once it is sure enough.
     const fresh: Record<string, Fit> = {}
-    for (const kind of kinds) {
+    for (const kind of [...kinds].sort((a, b) => (b === 'five_hour' ? 1 : 0) - (a === 'five_hour' ? 1 : 0))) {
       await $.clock.sleep(0)
-      fresh[kind] = fitKind(kind, scan.observations, choices)
+      const lend = fresh.five_hour
+      fresh[kind] = fitKind(kind, scan.observations, choices, kind !== 'five_hour' && lend !== undefined && (lend.confidence === 'medium' || lend.confidence === 'high') ? lend : null)
     }
     fits = fresh
     fitMemo = { key, fits }
@@ -960,6 +1067,12 @@ async function record($: EngineInterface, u: Pick<SessionUsage, 'context' | 'rat
     isGrown = true
   }
   if (isGrown) await $.store.set('readings', log.slice(-3000))
+  // A window in the log has reset: scan behind everything, so it goes into the history while its
+  // spend is still exact, whether or not the machine view is ever opened. At most twice an hour.
+  if (log.some(r => r[3] <= now) && now - archiveCheckedAt > 30 * MINUTE) {
+    archiveCheckedAt = now
+    $.clock.after(0, () => void scanAll($))
+  }
 }
 
 // Picks the plan in force from now on. A pick made less than a day ago is taken as a correction of
@@ -1385,8 +1498,15 @@ export function fitCard(fit: FitCard, width = CARD_W): string {
   const xOf = (v: number) => x0 + ((Math.log10(Math.max(10 ** lo, Math.min(10 ** hi, v))) - lo) / (hi - lo)) * (x1 - x0)
   const times = (v: number) => `×${v >= 10 ? v.toFixed(0) : v >= 1 ? v.toFixed(1) : v.toFixed(2)}`
   let s = label(0, 14, fit.label, 'i1', 13, BOLD) + confidenceMark(width, 14, fit.confidence, fit.confidenceWord)
-  s += label(0, 34, fit.head, 'i3', 11)
-  let y = 50
+  // The head runs on to a second line, at a " · ", where it is wider than the card.
+  const lines: string[] = []
+  for (const part of fit.head.split(' · ')) {
+    const last = lines[lines.length - 1]
+    if (last !== undefined && textWidth(`${last} · ${part}`, 11) <= width) lines[lines.length - 1] = `${last} · ${part}`
+    else lines.push(part)
+  }
+  lines.forEach((line, i) => (s += label(0, 34 + i * 15, line, 'i3', 11)))
+  let y = 50 + (lines.length - 1) * 15
   const scale = (top: number, bottom: number) => {
     let g = ''
     for (let e = lo; e <= hi; e += 1) {
@@ -1947,6 +2067,8 @@ export const register: Register = (on, options) => {
                   {t.fitHead(t.confidence[f.confidence], f.segments, f.hits)}
                   {f.mae !== null ? t.fitMiss(f.mae.toFixed(1)) : ''}
                   {f.outliers > 0 ? t.fitOutliers(f.outliers) : ''}
+                  {f.unseen ? t.fitUnseen(f.unseen) : ''}
+                  {f.lent ? t.fitLent(windowLabel(f.lent)) : ''}
                 </Text>
               </Text>
               {kindsLine !== '' && (
@@ -2153,7 +2275,7 @@ export const register: Register = (on, options) => {
                 .filter(([m]) => m !== f.ref)
                 .map(([m, value]) => ({ name: shortModel(m), value, color: MODEL_SERIES[Math.min(Math.max(order.indexOf(m), 0), 3)]! }))
               const multiples = Object.entries(f.planWindows).filter(([p]) => p !== f.refPlan && !p.startsWith('~'))
-              const head = `${t.fitCounts(f.segments, f.hits)}${f.mae !== null ? t.fitMiss(f.mae.toFixed(1)) : ''}${f.outliers > 0 ? t.fitOutliers(f.outliers) : ''}`
+              const head = `${t.fitCounts(f.segments, f.hits)}${f.mae !== null ? t.fitMiss(f.mae.toFixed(1)) : ''}${f.outliers > 0 ? t.fitOutliers(f.outliers) : ''}${f.unseen ? t.fitUnseen(f.unseen) : ''}${f.lent ? t.fitLent(windowLabel(f.lent)) : ''}`
               return (
                 <Box flexDirection="column" rowGap={1}>
                   <Svg

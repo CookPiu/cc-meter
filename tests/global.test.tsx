@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { costOf, globalView, priceOf } from '../hooks/register'
-import type { GlobalScan, ScanRow } from '../types'
+import { compactWindow, costOf, globalView, priceOf, segmentsOf } from '../hooks/register'
+import type { GlobalScan, Observation, ScanRow, Vec } from '../types'
 
 const M = 1_000_000
 const HOUR = 3_600_000
@@ -130,6 +130,65 @@ test('the pane switches to the global view, scans, and changes range', { options
   await must(p, { text: /71 天/ })
   await p.press({ key: 'tab-session' })
   await must(p, { text: '构成' })
+  await p.unmount()
+})
+
+test('a window that has reset goes into the history: its readings leave the log, and the fit still reads it', { options: { language: 'zh' } }, async ($, on) => {
+  const closed = NOW - HOUR
+  const open = NOW + 3 * HOUR
+  const store: Record<string, unknown> = {
+    readings: [
+      ...Array.from({ length: 61 }, (_, i) => [closed - 5 * HOUR + i * 60_000, 'five_hour', i, closed]),
+      ...Array.from({ length: 21 }, (_, i) => [open - 5 * HOUR + i * 60_000, 'five_hour', i, open]),
+    ],
+  }
+  const sent: number[] = []
+  on('clock.now', () => ({ value: NOW }))
+  on('clock.every', () => ({ value: { cancel: () => undefined } }) as never)
+  on('clock.after', () => ({ deny: 'test' }) as never)
+  on('clock.sleep', () => ({ value: undefined }) as never)
+  on('store.get', ($: unknown, e: { key: string }) => ({ value: store[e.key] }) as never)
+  on('store.set', ($: unknown, e: { key: string; value: unknown }) => ((store[e.key] = e.value), { value: undefined }) as never)
+  on('fs.read', () => ({ value: '{}' }) as never)
+  on('env.get', ($: unknown, e: { name: string }) => ({ value: e.name === 'USERPROFILE' ? 'C:/Users/me' : undefined }) as never)
+  // The scanner turns each reading it is sent into an observation with exact spend: 1,000 output
+  // tokens of Opus 5.5 per point.
+  on('process.run', ($: unknown, e: { init?: { stdin?: string } }) => {
+    const readings = (JSON.parse(e.init?.stdin ?? '{}') as { readings: [number, string, number, number][] }).readings
+    sent.push(readings.length)
+    const observations = readings.map(([t, kind, pct, resetsAt]) => ({ t, kind, y: pct / 100, resetsAt, hit: false, exact: true, byModel: { 'claude-opus-5-5': [0, pct * 1000, 0, 0, 0] } }))
+    return { value: { exitCode: 0, stdout: JSON.stringify({ ...scanWith(0), observations }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
+  on('session.measure', ($: unknown, e: { changed: string[] }) => ({ changed: e.changed }) as never)
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  await $.session.measure({ context: { tokens: 1000, window: 200_000, percent: 1 }, rateLimits: [five(25)], cost: { usd: 1 }, changed: ['rateLimits'] } as never)
+
+  const pane = {
+    plugin: 'token-almanac',
+    component: 'Pane' as const,
+    requestId: 'token-almanac',
+    props: { title: 'Token 用量', isFocused: true, bodyColumns: 80, placement: 'dock' as const, scroll: { offset: 0, bodyRows: 80 }, view: {} },
+  }
+  const p = await $.ui.mount({ ...pane, surface: 'terminal' })
+  await p.press({ key: 'tab-global' })
+  // The closed window is in the history, cut to the readings the fit closes its pieces on, making
+  // the same pieces; the log keeps the open window.
+  const archive = store.archive as Observation[]
+  const whole = Array.from({ length: 61 }, (_, i) => ({ t: closed - 5 * HOUR + i * 60_000, kind: 'five_hour', y: i / 100, resetsAt: closed, hit: false, exact: true, byModel: { 'claude-opus-5-5': [0, i * 1000, 0, 0, 0] as Vec } }))
+  expect(archive).toEqual(compactWindow(whole))
+  expect(segmentsOf('five_hour', archive)).toEqual(segmentsOf('five_hour', whole))
+  expect(archive.length >= 10 && archive.length <= 12).toBe(true)
+  expect((store.readings as [number, string, number, number][]).every(r => r[3] === open)).toBe(true)
+  // The next scan is sent the open window's readings only, and the fit still has the closed one's
+  // pieces besides the open one's.
+  await p.press({ key: 'rescan' })
+  expect(sent).toEqual([83, 22])
+  await p.press({ key: 'details' })
+  const head = await p.find({ text: /\d+ 段/ })
+  expect(Number(/(\d+) 段/.exec(JSON.stringify(head))?.[1]) > archive.length).toBe(true)
   await p.unmount()
 })
 

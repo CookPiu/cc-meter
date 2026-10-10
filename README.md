@@ -60,13 +60,15 @@ To price models at other rates (Bedrock, Vertex, a gateway) or to add models the
 
 Claude Code reports each limit only as a percent and a reset time. To turn that into "how much is left", the mod sums what this machine spent in each window, by model and token kind, at API list prices, and fits how much of a window each API dollar takes:
 
-- every rise of 5 points or more within a window, and every limit hit (a whole window), is one observation;
-- the fit is `rise × plan multiple ≈ Σ model factor × Σ token-kind factor × API spend`, solved by Levenberg–Marquardt in log parameters with weak priors and Huber reweighting;
+- every rise of 5 points or more within a window, and every limit hit (a whole window), is one observation; once a window resets, the observations it was cut into are kept with their exact spend, so the history does not fade;
+- the fit is `rise × plan multiple ≈ Σ model factor × Σ token-kind factor × API spend`, solved by Levenberg–Marquardt in log parameters with weak priors;
+- a piece that rose well past what its spend says is set aside as use from claude.ai or another device (that use only ever adds to a rise); a piece off the other way is weighed down (Huber);
+- the weekly window, with few pieces of its own, leans on the 5-hour fit's token-kind and model factors once that fit is of medium confidence, while its own size is fitted from its own pieces;
 - token-kind factors capture that limits weigh kinds differently from API prices (cache reads count for much less, so one long session lasts longer than many short ones);
 - you pick your plan in the pane, and each window counts under the plan picked when it began, so windows from different plans share one fit with each plan's multiple fitted rather than taken as sold;
 - windows from before your first pick count under that plan, unless their share per API dollar moved by 1.8× or more for 3 windows or more: such a stretch is fitted as a plan of its own and named after the plan sold at about that multiple (shown as inferred in the estimate details). Changes between plans of about the same size, such as Pro and Team, cannot be told this way.
 
-The pane shows the confidence and the fitted factors. Use from claude.ai or other devices counts in the official percent but not in this machine's transcripts, which makes estimates less certain. How Anthropic counts limits is not published; these figures are inferences.
+The pane shows the confidence and the fitted factors. Use from claude.ai or other devices counts in the official percent but not in this machine's transcripts: pieces it lifts far are set aside, a little of it still makes estimates less certain. How Anthropic counts limits is not published; these figures are inferences.
 
 ## What it reads, writes and runs
 
@@ -74,7 +76,7 @@ Everything stays on your machine. Nothing is sent anywhere: the mod makes no net
 
 - **Reads** Claude Code's transcripts under `<config>/projects/` to count tokens; message text is parsed only to find turn boundaries and is never stored or sent.
 - **Reads** Claude Code's `language` setting and the `CLAUDE_CONFIG_DIR`, `HOME`, `USERPROFILE`, `LC_ALL` and `LANG` environment variables.
-- **Writes** no files itself. Its scanner writes one file of its own, `<config>/token-almanac/cache.json` (per-file read offsets and 10-minute sums, so later scans read only new lines), which only token-almanac reads; it is not a setting, instruction or script for Claude Code or any other tool. Limit readings and the plans you pick go in the plugin's own store.
+- **Writes** no files itself. Its scanner writes one file of its own, `<config>/token-almanac/cache.json` (per-file read offsets and 10-minute sums, so later scans read only new lines), which only token-almanac reads; it is not a setting, instruction or script for Claude Code or any other tool. Limit readings, the plans you pick and a compact history of windows that have reset (a reading every 5 points with each model's tokens so far) go in the plugin's own store.
 - **Does not read** Claude Code's credentials or any token: the plan comes from your pick in the pane.
 - **Runs** one program: Node.js (`node`, or the `nodePath` option) on the bundled `scan/scan.mjs`, because transcripts are larger than the mod environment can read. The two command lines are
   - `node <plugin>/scan/scan.mjs session <this session's transcript>`, when a session starts, to count what ran before the mod loaded;
