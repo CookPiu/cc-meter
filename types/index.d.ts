@@ -26,7 +26,7 @@ export type Vec = [number, number, number, number, number]
 // One local day and hour of one project and model: [day, hour, project, model, ...Vec].
 export type ScanRow = [string, number, string, string, number, number, number, number, number]
 
-// One entry of the plan timeline in ~/.claude/token-runway/plans.json: the plan from that local day.
+// One entry of the plan timeline in ~/.claude/cc-meter/plans.json: the plan from that local day.
 export type PlanEntry = { from: string; plan: string; source?: 'manual' | 'auto' | 'inferred'; note?: string; fromMs?: number }
 
 // A limit reading kept by the mod: [at, window kind, percent used, resets at].
@@ -82,7 +82,7 @@ export type ScanStatus = { state: 'idle' | 'scanning' | 'error'; message?: strin
 
 declare module 'claude-code' {
   interface PluginState {
-    'token-runway': {
+    'cc-meter': {
       since: number
       totals: Tokens
       byModel: Record<string, Tokens>

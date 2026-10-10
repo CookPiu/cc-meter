@@ -1,4 +1,4 @@
-// token-runway's transcript scanner, run by the mod through `$.process.run(["node", ...])`.
+// cc-meter's transcript scanner, run by the mod through `$.process.run(["node", ...])`.
 //
 // The hooks environment reads at most 4 MiB per file and has no streams, while Claude Code's
 // transcripts run to hundreds of MB, so the reading happens here and only sums go back.
@@ -10,7 +10,7 @@
 //     read offset, 10-minute buckets and the limit hits it met), summed per local day, hour,
 //     project and model; sums since each window's start; and, for the fit, each limit reading
 //     and limit hit with what each model cost in its window up to that moment, tagged with the
-//     plan <config>/token-runway/plans.json says was in force. The current plan tier is read from
+//     plan <config>/cc-meter/plans.json says was in force. The current plan tier is read from
 //     <config>/.credentials.json: the two plan fields alone, never a token.
 //
 // Token vectors are [input, output, cacheRead, cacheWrite5m, cacheWrite1h].
@@ -325,7 +325,7 @@ export async function scanGlobal(projectsDir, cachePath, windows, now = Date.now
   await fsp.rename(tmp, cachePath)
 
   const planFile = await fsp
-    .readFile(join(config, 'token-runway', 'plans.json'), 'utf8')
+    .readFile(join(config, 'cc-meter', 'plans.json'), 'utf8')
     .then(JSON.parse)
     .catch(() => null)
   const plans = resolvePlans(planFile?.plans)

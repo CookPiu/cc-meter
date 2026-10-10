@@ -1,13 +1,13 @@
 {
-  "name": "token-runway",
+  "name": "cc-meter",
   "version": "0.3.0",
   "description": "Session and machine-wide token usage, plan limit meters with reset countdowns, and an estimate of how long each limit lasts, fitted to your own history.",
   "author": {
     "name": "CookPiu",
     "url": "https://github.com/CookPiu"
   },
-  "homepage": "https://github.com/CookPiu/token-runway",
-  "repository": "https://github.com/CookPiu/token-runway",
+  "homepage": "https://github.com/CookPiu/cc-meter",
+  "repository": "https://github.com/CookPiu/cc-meter",
   "license": "MIT",
   "keywords": [
     "usage",
