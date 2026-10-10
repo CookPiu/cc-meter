@@ -1207,8 +1207,8 @@ const TABULAR = ' style="font-variant-numeric:tabular-nums"'
 const paint = (color: string) => (color.startsWith('#') ? `fill="${color}"` : `class="${color}"`)
 
 function card(width: number, height: number, body: string): string {
-  const h = Math.ceil(height)
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${h}" viewBox="0 0 ${width} ${h}" font-family="${FONT}">${CARD_STYLE}${body}</svg>`
+  const tall = Math.ceil(height)
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${tall}" viewBox="0 0 ${width} ${tall}" font-family="${FONT}">${CARD_STYLE}${body}</svg>`
 }
 
 function label(x: number, y: number, text: string, cls: string, size: number, extra = ''): string {
