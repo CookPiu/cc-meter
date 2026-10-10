@@ -1,7 +1,7 @@
 {
   "name": "token-almanac",
   "displayName": "Token Almanac",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Session and machine-wide token usage, plan limit meters with reset countdowns, and an estimate of how long each limit lasts, fitted to your own history.",
   "author": {
     "name": "CookPiu",
