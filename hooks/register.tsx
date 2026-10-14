@@ -1505,6 +1505,38 @@ function animate($: EngineInterface): void {
   })
 }
 
+// The Buttons, Selects and other pressables each site drew last, by key: what each showed and the
+// element itself. A press names the handle its element was drawn under, and each redraw hands out
+// new ones, so a press made on a drawing the site has since redrawn reaches nothing. On the desktop
+// the click that moves the focus into the pane always does: the focus redraws the pane, and the
+// desktop holds its old drawing under the pointer until the button is let go. A pressable a redraw
+// leaves as it was is handed back as the same element, keeping its handle.
+type Drawn = { props?: { key?: unknown }; children?: unknown }
+const heldPressables = new Map<string, Map<string, { shown: string; element: unknown }>>()
+function keepPressables<T>(site: string, tree: T): T {
+  const last = heldPressables.get(site)
+  const next = new Map<string, { shown: string; element: unknown }>()
+  const walk = (node: unknown): unknown => {
+    if (node === null || typeof node !== 'object' || Array.isArray(node)) return node
+    const element = node as Drawn
+    const key = element.props?.key
+    if ('press' in element && typeof key === 'string') {
+      const shown = JSON.stringify(element, (k, v: unknown) => (k === 'press' ? undefined : v))
+      const kept = last?.get(key)
+      const same = kept !== undefined && kept.shown === shown ? kept.element : element
+      next.set(key, { shown, element: same })
+      return same
+    }
+    const children = element.children
+    if (!Array.isArray(children)) return element
+    const walked = children.map(walk)
+    return walked.every((child, i) => child === children[i]) ? element : { ...element, children: walked }
+  }
+  const kept = walk(tree) as T
+  heldPressables.set(site, next)
+  return kept
+}
+
 // The terminal's sparkline: one block per value, eight heights.
 function sparkText(values: readonly number[]): string {
   const blocks = '▁▂▃▄▅▆▇█'
@@ -2024,7 +2056,7 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const { Box, Text, Button } = $.ui.resolve(e)
 
-    return (
+    return keepPressables(`${e.surface}:band`, (
       <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center">
         <Text>
           <Text color="claude" bold>
@@ -2049,11 +2081,12 @@ export const register: Register = (on, options) => {
         <Button key="open" label={t.bandOpen} dimColor onPress={() => void $.ui.open({ id: PANE, title: t.paneTitle })} />
         <Button key="hide" label={t.bandHide} dimColor role="dismiss" onPress={() => update($, isBandHidden, () => true)} />
       </Box>
-    )
+    ))
   })
 
   // The detail pane: the limits on top, then this session or this machine, the rest folded away.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const site = `${e.surface}:pane`
     const snap = await read($, snapshot)
     const series = await read($, samples)
     const mode = await read($, view)
@@ -2310,7 +2343,7 @@ export const register: Register = (on, options) => {
       // what the session is made of and by which models open on asking.
       if (Svg !== undefined) {
         const isOpen = await read($, details)
-        return (
+        return keepPressables(site, (
           <Box flexDirection="column" rowGap={2}>
             {tabs}
             {limits}
@@ -2324,9 +2357,9 @@ export const register: Register = (on, options) => {
             </Box>
             {close}
           </Box>
-        )
+        ))
       }
-      return (
+      return keepPressables(site, (
         <Box flexDirection="column" rowGap={1}>
           {tabs}
           {limits}
@@ -2337,7 +2370,7 @@ export const register: Register = (on, options) => {
           {note}
           {close}
         </Box>
-      )
+      ))
     }
 
     // The global view.
@@ -2365,7 +2398,7 @@ export const register: Register = (on, options) => {
       </Box>
     )
     if (scan === null || g === null) {
-      return (
+      return keepPressables(site, (
         <Box flexDirection="column" rowGap={1}>
           {tabs}
           {limits}
@@ -2373,7 +2406,7 @@ export const register: Register = (on, options) => {
           <Text dimColor>{`${t.firstScan}${spinner}`}</Text>
           {close}
         </Box>
-      )
+      ))
     }
 
     const top = g.byModel.slice(0, 3).map(m => m.model)
@@ -2647,7 +2680,7 @@ export const register: Register = (on, options) => {
           </Text>
         </Box>
       )
-      return (
+      return keepPressables(site, (
         <Box flexDirection="column" rowGap={2}>
           {tabs}
           {limits}
@@ -2674,9 +2707,9 @@ export const register: Register = (on, options) => {
           </Box>
           {close}
         </Box>
-      )
+      ))
     }
-    return (
+    return keepPressables(site, (
       <Box flexDirection="column" rowGap={1}>
         {tabs}
         {limits}
@@ -2700,6 +2733,6 @@ export const register: Register = (on, options) => {
         </Box>
         {close}
       </Box>
-    )
+    ))
   })
 }

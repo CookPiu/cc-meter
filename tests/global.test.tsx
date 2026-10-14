@@ -237,6 +237,59 @@ test('on the desktop a scan does not redraw every frame, and a refresh does not 
   await p.unmount()
 })
 
+test('a redraw keeps the press handles of the buttons it leaves as they were', { options: { language: 'zh', motion: 'off' } }, async ($, on) => {
+  on('clock.now', () => ({ value: NOW }))
+  on('clock.every', () => ({ deny: 'test' }) as never)
+  on('clock.after', () => ({ value: undefined }) as never)
+  on('clock.sleep', () => ({ value: undefined }) as never)
+  const store: Record<string, unknown> = {}
+  on('store.get', ($: unknown, e: { key: string }) => ({ value: store[e.key] }) as never)
+  on('store.set', ($: unknown, e: { key: string; value: unknown }) => ((store[e.key] = e.value), { value: undefined }) as never)
+  on('fs.read', () => ({ value: '{}' }) as never)
+  on('env.get', () => ({ value: undefined }) as never)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: JSON.stringify(scanWith(M)), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never)
+  on('session.measure', ($: unknown, e: { changed: string[] }) => ({ changed: e.changed }) as never)
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine</Text>
+  })
+  const measure = (percent: number) =>
+    $.session.measure({ context: { tokens: 1000, window: 200_000, percent: 1 }, rateLimits: [five(percent)], cost: { usd: 1 }, changed: ['rateLimits'] } as never)
+  await measure(40)
+  const p = await $.ui.mount({
+    plugin: 'token-almanac',
+    component: 'Pane',
+    requestId: 'token-almanac',
+    surface: 'desktop',
+    props: { title: 'Token 用量', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 80 }, view: {} },
+  } as never)
+  // Each Button's press handle, by key, as the surface holds it.
+  const handles = async () => {
+    const out: Record<string, number> = {}
+    const walk = (node: unknown): void => {
+      if (node === null || typeof node !== 'object') return
+      const element = node as { type?: string; props?: { key?: string }; press?: { handle?: number }; children?: unknown[] }
+      if (element.type === 'Button' && element.props?.key !== undefined && element.press?.handle !== undefined) out[element.props.key] = element.press.handle
+      for (const child of element.children ?? []) walk(child)
+    }
+    walk(await p.drawn())
+    return out
+  }
+  const before = await handles()
+  expect(Object.keys(before)).toEqual(expect.arrayContaining(['tab-session', 'tab-global', 'close']))
+  // The limit moves: the figures are drawn again, the buttons are the ones the desktop holds.
+  const drawn = JSON.stringify(await p.drawn())
+  await measure(41)
+  expect(JSON.stringify(await p.drawn())).not.toBe(drawn)
+  expect(await handles()).toEqual(before)
+  // A button that looks otherwise is a new one.
+  await p.press({ key: 'tab-global' })
+  const after = await handles()
+  expect(after['tab-global']).not.toBe(before['tab-global'])
+  expect(after['close']).toBe(before['close'])
+  await p.unmount()
+})
+
 test('the global view leads with what each window holds and has left', { options: { language: 'zh' } }, async ($, on) => {
   // Two limit hits on Pro, at $60 and $100 of Opus 5.5 output; this window has spent $20 so far.
   const hit = (t: number, outputTokens: number) => ({
