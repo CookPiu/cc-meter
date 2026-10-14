@@ -61,14 +61,15 @@ To price models at other rates (Bedrock, Vertex, a gateway) or to add models the
 Claude Code reports each limit only as a percent and a reset time. To turn that into "how much is left", the mod sums what this machine spent in each window, by model and token kind, at API list prices, and fits how much of a window each API dollar takes:
 
 - every rise of 5 points or more within a window, and every limit hit (a whole window), is one observation; once a window resets, the observations it was cut into are kept with their exact spend, so the history does not fade;
-- the fit is `rise × plan multiple ≈ Σ model factor × Σ token-kind factor × API spend`, solved by Levenberg–Marquardt in log parameters with weak priors;
+- the fit is `rise × plan multiple × window size ≈ Σ model factor × Σ token-kind factor × API spend`, solved by Levenberg–Marquardt in log parameters with weak priors;
+- the window size has a level and a per-window stray: the level steps at official limit changes (the 2026-05-06 doubling of Claude Code's 5-hour limits, the 2026-09-22 increase) and drifts slowly between them, a day at a time over the last two weeks, so a quiet change is followed within days; each window may run a little large or small (fitted spread), so the pieces of one window share it and a window that ran large says nothing about how token kinds weigh;
 - a piece that rose well past what its spend says is set aside as use from claude.ai or another device (that use only ever adds to a rise); a piece off the other way is weighed down (Huber);
 - the weekly window, with few pieces of its own, leans on the 5-hour fit's token-kind and model factors once that fit is of medium confidence, while its own size is fitted from its own pieces;
 - token-kind factors capture that limits weigh kinds differently from API prices (cache reads count for much less, so one long session lasts longer than many short ones);
 - you pick your plan in the pane, and each window counts under the plan picked when it began, so windows from different plans share one fit with each plan's multiple fitted rather than taken as sold;
 - windows from before your first pick count under that plan, unless their share per API dollar moved by 1.8× or more for 3 windows or more: such a stretch is fitted as a plan of its own and named after the plan sold at about that multiple (shown as inferred in the estimate details). Changes between plans of about the same size, such as Pro and Team, cannot be told this way.
 
-The pane shows the confidence and the fitted factors. Use from claude.ai or other devices counts in the official percent but not in this machine's transcripts: pieces it lifts far are set aside, a little of it still makes estimates less certain. How Anthropic counts limits is not published; these figures are inferences.
+The pane shows the confidence and the fitted factors. Confidence comes from a held-out check: each of the latest 8 windows is foretold from a fit of the others, and ± next to it is the typical miss (high within 12% on 4 windows or more, medium within 30% on 2). An official change of unpublished size after the last window read keeps it low until a window after the change has been read. Use from claude.ai or other devices counts in the official percent but not in this machine's transcripts: pieces it lifts far are set aside, a little of it still makes estimates less certain. How Anthropic counts limits is not published; these figures are inferences.
 
 ## What it reads, writes and runs
 

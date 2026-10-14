@@ -296,7 +296,8 @@ function nominalRatio(plan: string, against: string): number | null {
 
 // A plan's window against the fit's reference plan: fitted, else as sold, else unknown.
 function planScale(fit: Fit, plan: string): number | null {
-  return fit.s[plan] ?? nominalRatio(plan, fit.refPlan)
+  const s = fit.s[plan] ?? nominalRatio(plan, fit.refPlan)
+  return s === null ? null : s * (fit.later ?? 1)
 }
 // How many windows' worth of evidence the starting values (API prices, sold multiples) count as.
 const PRIOR_WINDOWS = 0.5
@@ -399,24 +400,80 @@ export function compactWindow(obs: readonly Observation[]): Observation[] {
   return hit === undefined ? kept : [...kept, hit]
 }
 
-// Fits one window kind on its pieces: rise × s[plan] ≈ Σ f[model] × Σ g[kind] × spend[model][kind].
-// g (one per kind of token, shared by every model) is the share of a Pro window one API dollar of
-// that kind of the reference model takes, on the reference plan (the one picked now, else the one
-// with the most windows);
-// f scales another model against the reference model (1); s is another plan's window against the
-// reference plan's (1). All are fitted in logs, together (Levenberg–Marquardt). A
-// piece's miss is told against what it can be off by: the limit reports whole percents, so each
-// end of a piece may be half a point off (ROUNDING), and use the transcripts do not see adds a
-// share of the rise (SPREAD). Each parameter starts where API prices and sold multiples put it
-// (the kinds' g equal, f at 1, s at the sold ratio where both plans have one, else at 1), that
-// start weighing as much as half a piece (PRIOR_WINDOWS, or WEAK_PRIOR with no sold ratio; the
-// kinds' g far less, KIND_PRIOR), so the
-// pieces move it as far as they agree to. Once the rest have settled, a piece that rose more than
-// UNSEEN_AT of its own spreads past what its spend says is set aside: use this machine did not see
-// (another device, the web app) only ever adds to a rise. A piece off the other way by more than
-// 2.5 spreads, which no unseen use explains, is weighed down (Huber).
-function fitSegments(kind: string, segs: Segment[], preferRef: string, borrow: Fit | null = null): Fit {
+// Official changes to the size of a window kind: a window that begins on or after `at` holds `x`
+// times what one before it held, or an amount not published (null). The fit gives the windows on
+// each side a level of their own, so a change is not taken for a way of use or a model's weight.
+export const OFFICIAL_CHANGES: readonly { at: number; kind: string; x: number | null }[] = [
+  // https://www.anthropic.com/news/higher-limits-spacex: Claude Code's five-hour limits doubled.
+  { at: Date.parse('2026-05-06T00:00:00Z'), kind: 'five_hour', x: 2 },
+  // https://www.anthropic.com/claude-opus-5-5: five-hour limits raised, by how much not said.
+  { at: Date.parse('2026-09-22T00:00:00Z'), kind: 'five_hour', x: null },
+]
+// How far a published change may be off what was announced ("doubled"), in logs.
+const ANNOUNCED_SD = 0.3
+// How far a window's size may drift in a week, in logs, with no change announced: limits are
+// tuned quietly too. A start, fitted to how far the levels moved with DRIFT_PRIOR steps' worth of
+// it, between DRIFT_MIN and DRIFT_MAX. The level is held a day at a time over the latest two weeks
+// (a window at a time for windows longer than a day), a week at a time before that.
+const DRIFT = 0.08
+const DRIFT_MIN = 0.02
+const DRIFT_MAX = 0.4
+const DRIFT_PRIOR = 2
+const FINE_STEPS = 14
+const COARSE_STEP = 7
+// How far one window's size strays from its stretch's level, in logs, before the windows say:
+// what the transcripts cannot see (the web app, another device) and how each was used. Fitted
+// from the windows once there are MIN_TAU_WINDOWS of them, between TAU_MIN and TAU_MAX.
+const TAU_START = 0.12
+const TAU_MIN = 0.02
+const TAU_MAX = 0.5
+const MIN_TAU_WINDOWS = 5
+// How many of the latest windows the held-out check takes out in turn, and the least rise one
+// needs for its miss to say something next to rounding.
+const HELD_OUT_WINDOWS = 8
+const HELD_OUT_MIN_RISE = 0.15
 
+// What a fit carries beyond what the pane draws: its parameters, for a held-out refit to start
+// from, and each piece's place.
+type Solved = {
+  fit: Fit
+  p: number[]
+  u: number[]
+  tau: number
+  drift: number
+  robust: number[]
+  // Each piece's window (index into the windows).
+  pieceWindow: number[]
+  predict: (i: number, withWindow: boolean) => number
+}
+
+// Fits one window kind on its pieces: rise × s[plan] × e^(level + u[window]) ≈ Σ f[model] × Σ g[kind]
+// × spend[model][kind]. g (one per kind of token, shared by every model) is the share of a window
+// one API dollar of that kind of the reference model takes, on the reference plan (the one picked
+// now, else the one with the most windows) at the latest level; f scales another model against
+// the reference model (1); s is another plan's window against the reference plan's (1). The level
+// is the window's size over time: a step at each official change, and a slow drift between them
+// (DRIFT). u is each window's own stray from its level (sd tau, fitted), so the pieces of one
+// window share it: a window that ran large tells nothing of how the kinds weigh. All are fitted in
+// logs, together (Levenberg–Marquardt, each window's u eliminated in closed form, so the cost grows
+// with the pieces, not with the windows squared). A piece's miss is told against what it can be
+// off by: the limit reports whole percents, so each end of a piece may be half a point off
+// (ROUNDING), and how the piece was used adds a share of the rise (SPREAD). Each parameter starts
+// where API prices and sold multiples put it (the kinds' g equal, f at 1, s at the sold ratio where
+// both plans have one, else at 1), that start weighing as much as half a piece (PRIOR_WINDOWS, or
+// WEAK_PRIOR with no sold ratio; the kinds' g far less, KIND_PRIOR), so the pieces move it as far
+// as they agree to. Once the rest have settled, a piece that rose more than UNSEEN_AT of its own
+// spreads past what its spend says is set aside: use this machine did not see (another device, the
+// web app) only ever adds to a rise. A piece off the other way by more than 2.5 spreads, which no
+// unseen use explains, is weighed down (Huber).
+function solveSegments(
+  kind: string,
+  segs: Segment[],
+  preferRef: string,
+  borrow: Fit | null,
+  opts: { drift?: number; warm?: Solved; heldOut?: number; maxIter?: number; quick?: boolean } = {},
+): Solved {
+  const drift = opts.drift ?? DRIFT
   const spend = new Map<string, number>()
   for (const sg of segs) for (const [m, c] of Object.entries(sg.c)) spend.set(m, (spend.get(m) ?? 0) + c.reduce((a, b) => a + b, 0))
   const models = [...spend].sort((a, b) => b[1] - a[1]).map(([m]) => m)
@@ -442,12 +499,97 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string, borrow: F
           return { g: logs.map(x => x - mean), f }
         })()
 
-  // Parameters, in logs: g[0..3], then f of each other model, then s of each other plan.
+  // Windows, and the stretches of level they fall in: an era between official changes (0 the
+  // latest), cut into days, then weeks, counted back from the era's last window when the level
+  // may drift.
+  const length = windowLength(kind) ?? HOUR
+  const wins = [...new Set(segs.map(sg => sg.window))].sort((a, b) => a - b)
+  const nW = wins.length
+  const windowIndex = new Map(wins.map((w, i) => [w, i]))
+  const latestStart = wins[nW - 1]! - length
+  // The changes the windows span: those before the first window or after the latest say nothing here.
+  const changes = OFFICIAL_CHANGES.filter(c => c.kind === kind && c.at > wins[0]! - length && c.at <= latestStart).sort((a, b) => a.at - b.at)
+  const eraOf = (w: number) => changes.filter(c => w - length < c.at).length
+  const eraLast = new Map<number, number>()
+  for (const w of wins) eraLast.set(eraOf(w), Math.max(eraLast.get(eraOf(w)) ?? -Infinity, w))
+  // A stretch is counted in steps back from its era's last window: a fine step (a day, or the
+  // window's length if longer) for FINE_STEPS of them, then COARSE_STEP fine steps at a time.
+  const fine = Math.max(24 * HOUR, length)
+  const binOf = (w: number): [number, number] => {
+    const era = eraOf(w)
+    if (drift === 0) return [era, 0]
+    const back = Math.floor((eraLast.get(era)! - w) / fine)
+    return [era, back < FINE_STEPS ? back : FINE_STEPS + COARSE_STEP * Math.floor((back - FINE_STEPS) / COARSE_STEP)]
+  }
+  const binKeys = [...new Set(wins.map(w => binOf(w).join('|')))]
+    .map(k => k.split('|').map(Number) as [number, number])
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1])
+  const binIndex = new Map(binKeys.map((k, i) => [k.join('|'), i]))
+  const windowBin = wins.map(w => binIndex.get(binOf(w).join('|'))!)
+  // The pull between each stretch and the next older one: its expected step (the announced
+  // changes between them) and how far it may stray from that: the drift over the weeks between
+  // them, and how far each change crossed may be off what was announced.
+  const weeksPerStep = fine / (7 * 24 * HOUR)
+  const steps = binKeys.slice(1).map((older, i) => {
+    const newer = binKeys[i]!
+    const crossed = changes.slice(changes.length - older[0], changes.length - newer[0])
+    return {
+      newer: i,
+      older: i + 1,
+      weeks: weeksPerStep * Math.max(1, newer[0] === older[0] ? older[1] - newer[1] : 1),
+      mean: -crossed.reduce((a, c) => a + Math.log(c.x ?? 1), 0),
+      announced: crossed.reduce((a, c) => a + (c.x === null ? 9 : ANNOUNCED_SD * ANNOUNCED_SD), 0),
+    }
+  })
+  // The drift, fitted to how far the levels moved (DRIFT_PRIOR steps' worth of DRIFT to start).
+  let driftNow = opts.warm?.drift ?? drift
+  const stepWeight = (st: (typeof steps)[number]) => {
+    const v = driftNow * driftNow * st.weeks + st.announced
+    return v > 0 ? 1 / v : 1e6
+  }
+
+  // Parameters, in logs: g[0..3], then f of each other model, then s of each other plan, then the
+  // level of each stretch but the latest (0). Each window's u is kept apart.
   const nG = 4
   const nF = others.length
-  const n = nG + nF + plans.length
+  const nP = plans.length
+  const n = nG + nF + nP + binKeys.length - 1
+  const levelAt = (b: number) => (b === 0 ? -1 : nG + nF + nP + b - 1)
+  const planIndex = segs.map(sg => (sg.plan === refPlan ? -1 : nG + nF + plans.indexOf(sg.plan)))
+  const pieceWindow = segs.map(sg => windowIndex.get(sg.window)!)
+  const pieceLevel = pieceWindow.map(wi => levelAt(windowBin[wi]!))
+  // Each piece's spend as [model][kind], the reference model first, and the other models it has.
+  const spendOf = segs.map(sg => models.map(m => sg.c[m] ?? [0, 0, 0, 0]))
+  const othersIn = spendOf.map(c => others.flatMap((_, k) => (c[k + 1]!.some(x => x > 0) ? [k + 1] : [])))
+  // The parameters each window's pieces touch: the only ones its u ties to.
+  const touched = wins.map(() => new Set<number>([0, 1, 2, 3]))
+  segs.forEach((_, i) => {
+    const set = touched[pieceWindow[i]!]!
+    for (const m of othersIn[i]!) set.add(nG + m - 1)
+    if (planIndex[i]! >= 0) set.add(planIndex[i]!)
+    if (pieceLevel[i]! >= 0) set.add(pieceLevel[i]!)
+  })
+  const touchedList = touched.map(set => [...set])
+  // Each piece's row touches the same parameters every round: the kinds' weights, the other
+  // models it has, its plan's multiple and its stretch's level.
+  const pieceIdx = segs.map((_, i) => [
+    0,
+    1,
+    2,
+    3,
+    ...othersIn[i]!.map(m => nG + m - 1),
+    ...(planIndex[i]! >= 0 ? [planIndex[i]!] : []),
+    ...(pieceLevel[i]! >= 0 ? [pieceLevel[i]!] : []),
+  ])
+  const pieceVal = pieceIdx.map(idx => new Array<number>(idx.length).fill(0))
   const totalOf = (sg: Segment) => Object.values(sg.c).reduce((a, c) => a + c.reduce((x, y) => x + y, 0), 0)
-  const start = (() => {
+
+  let p: number[]
+  let u: number[]
+  if (opts.warm !== undefined) {
+    p = [...opts.warm.p]
+    u = [...opts.warm.u]
+  } else {
     let num = 0
     let den = 0
     for (const sg of segs) {
@@ -455,91 +597,190 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string, borrow: F
       num += totalOf(sg) / target
       den += (totalOf(sg) / target) ** 2
     }
-    return Math.log(num / den)
-  })()
-  let p = [...new Array<number>(nG).fill(start), ...new Array<number>(nF).fill(0), ...plans.map(pl => Math.log(startScale(pl)))]
+    const start = Math.log(num / den)
+    p = [...new Array<number>(nG).fill(start), ...new Array<number>(nF).fill(0), ...plans.map(pl => Math.log(startScale(pl))), ...new Array<number>(binKeys.length - 1).fill(0)]
+    // Start each older stretch where the announced changes put it.
+    let level = 0
+    steps.forEach(st => {
+      level += st.mean
+      p[levelAt(st.older)] = level
+    })
+    u = new Array<number>(nW).fill(0)
+  }
+  let tau = opts.warm?.tau ?? TAU_START
+  // A quick fit (for how far each window strayed, no more) keeps tau and weighs down once.
+  const isTauFitted = opts.warm === undefined && opts.quick !== true && nW >= MIN_TAU_WINDOWS
 
-  const unpack = (q: number[]) => ({
-    g: q.slice(0, nG).map(Math.exp),
-    f: { [ref]: 1, ...Object.fromEntries(others.map((m, i) => [m, Math.exp(q[nG + i]!)])) } as Record<string, number>,
-    s: { [refPlan]: 1, ...Object.fromEntries(plans.map((pl, i) => [pl, Math.exp(q[nG + nF + i]!)])) } as Record<string, number>,
-  })
   // A hit is the whole window, exact at 100%: it counts double, unless the window's readings already
-  // cut it into pieces, which say the same spend again.
+  // cut it into pieces, which say the same spend again. A window held out counts for nothing.
   const read = new Set(segs.filter(sg => !sg.hit).map(sg => sg.window))
-  const base = segs.map(sg => (sg.hit && !read.has(sg.window) ? 2 : 1))
-  let robust = segs.map(() => 1)
+  const base = segs.map((sg, i) => (pieceWindow[i] === opts.heldOut ? 0 : sg.hit && !read.has(sg.window) ? 2 : 1))
+  let robust = opts.warm !== undefined ? [...opts.warm.robust] : segs.map(() => 1)
   const ROUNDING = 0.006
   const SPREAD = 0.1
 
-  // Residuals and their Jacobian: one row per piece (relative miss), then the start's pulls. The
-  // cost of a trial step needs the residuals alone, so the Jacobian is built only when asked for.
-  const NO_J: number[] = []
-  const system = (q: number[], withJ = true) => {
-    const { g, f, s } = unpack(q)
-    const rows: { r: number; j: number[]; w: number }[] = []
-    segs.forEach((sg, i) => {
-      const target = sg.dy * s[sg.plan]!
-      const perKind = [0, 1, 2, 3].map(k => models.reduce((acc, m) => acc + f[m]! * (sg.c[m]?.[k] ?? 0), 0))
-      const pred = perKind.reduce((acc, x, k) => acc + g[k]! * x, 0)
-      // What this piece can be off by, in shares of a window scaled by the plan's multiple.
-      const d = Math.hypot(ROUNDING * s[sg.plan]!, SPREAD * target)
-      if (!withJ) {
-        rows.push({ r: (pred - target) / d, j: NO_J, w: base[i]! * robust[i]! })
-        return
+  // One piece's share by the parameters (g and f taken out of logs once per round, in `ex`), and,
+  // into `perKind` and `perModel`, the share each kind's weight and each model's moves it by.
+  const perKind = [0, 0, 0, 0]
+  const perModel = new Array<number>(models.length).fill(0)
+  const expOf = (q: number[]) => ({ g: q.slice(0, nG).map(Math.exp), f: [1, ...others.map((_, k) => Math.exp(q[nG + k]!))] })
+  const pieceAt = (i: number, q: number[], ex: { g: number[]; f: number[] }, uw: number) => {
+    const c = spendOf[i]!
+    const scale = Math.exp((planIndex[i]! >= 0 ? q[planIndex[i]!]! : 0) + (pieceLevel[i]! >= 0 ? q[pieceLevel[i]!]! : 0) + uw)
+    const g = ex.g
+    perKind[0] = perKind[1] = perKind[2] = perKind[3] = 0
+    const add = (m: number) => {
+      const fm = ex.f[m]!
+      const cm = c[m]!
+      let byG = 0
+      for (let k = 0; k < 4; k += 1) {
+        perKind[k]! += fm * cm[k]!
+        byG += g[k]! * cm[k]!
       }
-      const j = new Array<number>(n).fill(0)
-      perKind.forEach((x, k) => (j[k] = (g[k]! * x) / d))
-      others.forEach((m, r) => (j[nG + r] = (f[m]! * (sg.c[m] ?? [0, 0, 0, 0]).reduce((acc, v, k) => acc + g[k]! * v, 0)) / d))
-      const pi = plans.indexOf(sg.plan)
-      if (pi >= 0) j[nG + nF + pi] = -target / d
-      rows.push({ r: (pred - target) / d, j, w: base[i]! * robust[i]! })
-    })
-    const meanG = q.slice(0, nG).reduce((a, b) => a + b, 0) / nG
+      perModel[m] = (fm * byG) / scale
+    }
+    add(0)
+    for (const m of othersIn[i]!) add(m)
+    let share = 0
+    for (let k = 0; k < 4; k += 1) {
+      perKind[k] = (g[k]! * perKind[k]!) / scale
+      share += perKind[k]!
+    }
+    return share
+  }
+  const spreadOf = (dy: number) => Math.hypot(ROUNDING, SPREAD * dy)
+
+  // Residuals with their Jacobians, sparse: one row per piece, then the starts' pulls and the
+  // steps between stretches (globals only), then each window's pull toward its level (u only).
+  type Row = { r: number; idx: number[]; val: number[]; wi: number; ju: number; w: number }
+  const NONE: number[] = []
+  const system = (q: number[], uq: number[], withJ = true, withPieces = true) => {
+    const rows: Row[] = []
+    const ex = expOf(q)
+    for (let i = 0; i < (withPieces ? segs.length : 0); i += 1) {
+      const wi = pieceWindow[i]!
+      const share = pieceAt(i, q, ex, uq[wi]!)
+      const dy = segs[i]!.dy
+      const d = spreadOf(dy)
+      const r = (share - dy) / d
+      const w = base[i]! * robust[i]!
+      if (!withJ) {
+        rows.push({ r, idx: NONE, val: NONE, wi, ju: 0, w })
+        continue
+      }
+      // The same order as pieceIdx: kinds, other models, plan, level.
+      const val = pieceVal[i]!
+      let at = 0
+      for (let k = 0; k < 4; k += 1) val[at++] = perKind[k]! / d
+      for (const m of othersIn[i]!) val[at++] = perModel[m]! / d
+      while (at < val.length) val[at++] = -share / d
+      rows.push({ r, idx: pieceIdx[i]!, val, wi, ju: -share / d, w })
+    }
+    const meanG = (q[0]! + q[1]! + q[2]! + q[3]!) / nG
     for (let k = 0; k < nG; k += 1) {
-      const j = new Array<number>(n).fill(0)
-      for (let c = 0; c < nG; c += 1) j[c] = (c === k ? 1 : 0) - 1 / nG
-      rows.push(lent === null ? { r: q[k]! - meanG, j, w: KIND_PRIOR } : { r: q[k]! - meanG - lent.g[k]!, j, w: BORROW_WINDOWS })
+      const val = [0, 1, 2, 3].map(c => (c === k ? 1 : 0) - 1 / nG)
+      rows.push(lent === null ? { r: q[k]! - meanG, idx: [0, 1, 2, 3], val, wi: -1, ju: 0, w: KIND_PRIOR } : { r: q[k]! - meanG - lent.g[k]!, idx: [0, 1, 2, 3], val, wi: -1, ju: 0, w: BORROW_WINDOWS })
     }
-    for (let i = 0; i < nF; i += 1) {
-      const j = new Array<number>(n).fill(0)
-      j[nG + i] = 1
-      const at = lent?.f[others[i]!]
-      rows.push(at === undefined ? { r: q[nG + i]!, j, w: PRIOR_WINDOWS } : { r: q[nG + i]! - at, j, w: BORROW_WINDOWS })
-    }
-    plans.forEach((pl, i) => {
-      const j = new Array<number>(n).fill(0)
-      j[nG + nF + i] = 1
-      rows.push({ r: q[nG + nF + i]! - Math.log(startScale(pl)), j, w: priorWeight(pl) })
+    others.forEach((m, i) => {
+      const at = lent?.f[m]
+      rows.push(at === undefined ? { r: q[nG + i]!, idx: [nG + i], val: [1], wi: -1, ju: 0, w: PRIOR_WINDOWS } : { r: q[nG + i]! - at, idx: [nG + i], val: [1], wi: -1, ju: 0, w: BORROW_WINDOWS })
     })
+    plans.forEach((pl, i) => rows.push({ r: q[nG + nF + i]! - Math.log(startScale(pl)), idx: [nG + nF + i], val: [1], wi: -1, ju: 0, w: priorWeight(pl) }))
+    for (const st of steps) {
+      const a = levelAt(st.newer)
+      const b = levelAt(st.older)
+      const idx = a >= 0 ? [b, a] : [b]
+      const val = a >= 0 ? [1, -1] : [1]
+      rows.push({ r: q[b]! - (a >= 0 ? q[a]! : 0) - st.mean, idx, val, wi: -1, ju: 0, w: stepWeight(st) })
+    }
+    for (let wi = 0; wi < nW; wi += 1) rows.push({ r: uq[wi]!, idx: NONE, val: NONE, wi, ju: 1, w: 1 / (tau * tau) })
     return rows
   }
-  const sumSquares = (rows: { r: number; w: number }[]) => rows.reduce((acc, row) => acc + row.w * row.r * row.r, 0)
+  const sumSquares = (rows: Row[]) => rows.reduce((acc, row) => acc + row.w * row.r * row.r, 0)
+  // The same sum for a trial step, the pieces' part without building their rows.
+  const costAt = (q: number[], uq: number[]) => {
+    const ex = expOf(q)
+    let cost = 0
+    for (let i = 0; i < segs.length; i += 1) {
+      const w = base[i]! * robust[i]!
+      if (w === 0) continue
+      const dy = segs[i]!.dy
+      const r = (pieceAt(i, q, ex, uq[pieceWindow[i]!]!) - dy) / spreadOf(dy)
+      cost += w * r * r
+    }
+    return cost + sumSquares(system(q, uq, false, false))
+  }
 
-  // Weighs down the pieces the rest cannot explain: three times, each once the fit has settled or
-  // had 30 rounds, whichever comes first, so a fit that settles fast is weighed all the same.
-  let mu = 1e-3
-  let reweighs = 0
-  let since = 0
-  for (let iter = 0; iter < 200; iter += 1) {
-    const rows = system(p)
+  // The normal equations, each window's u eliminated: (A − B D⁻¹ Bᵀ) δp = b − B D⁻¹ bu, then
+  // δu = D⁻¹ (bu − Bᵀ δp). With `damp`, the diagonals are raised by that factor (Marquardt).
+  const normal = (rows: Row[], damp: number) => {
     const a = Array.from({ length: n }, () => new Array<number>(n).fill(0))
     const b = new Array<number>(n).fill(0)
-    for (const { r, j, w } of rows) {
-      for (let x = 0; x < n; x += 1) {
-        b[x]! -= w * j[x]! * r
-        for (let y = 0; y < n; y += 1) a[x]![y]! += w * j[x]! * j[y]!
+    // B, window by window: row wi * n + parameter.
+    const bm = new Float64Array(nW * n)
+    const dd = new Array<number>(nW).fill(0)
+    const bu = new Array<number>(nW).fill(0)
+    for (const { r, idx, val, wi, ju, w } of rows) {
+      if (w === 0) continue
+      for (let x = 0; x < idx.length; x += 1) {
+        const ix = idx[x]!
+        const wx = w * val[x]!
+        b[ix]! -= wx * r
+        const ax = a[ix]!
+        for (let y = 0; y < idx.length; y += 1) ax[idx[y]!]! += wx * val[y]!
+        if (wi >= 0) bm[wi * n + ix]! += wx * ju
+      }
+      if (wi >= 0) {
+        dd[wi]! += w * ju * ju
+        bu[wi]! -= w * ju * r
       }
     }
-    for (let x = 0; x < n; x += 1) a[x]![x]! *= 1 + mu
-    const step = solve(a, b)
+    for (let x = 0; x < n; x += 1) a[x]![x]! *= 1 + damp
+    for (let wi = 0; wi < nW; wi += 1) dd[wi]! *= 1 + damp
+    const schur = a.map(row => [...row])
+    const rhs = [...b]
+    // Each window's u ties only to the parameters its pieces touch: the update stays that small.
+    for (let wi = 0; wi < nW; wi += 1) {
+      const at = wi * n
+      const inv = 1 / dd[wi]!
+      const list = touchedList[wi]!
+      for (const x of list) {
+        const cx = bm[at + x]!
+        if (cx === 0) continue
+        rhs[x]! -= cx * bu[wi]! * inv
+        const sx = schur[x]!
+        for (const y of list) sx[y]! -= cx * bm[at + y]! * inv
+      }
+    }
+    return { schur, rhs, bm, dd, bu }
+  }
+  const stepOf = (rows: Row[], damp: number) => {
+    const { schur, rhs, bm, dd, bu } = normal(rows, damp)
+    const dp = solve(schur, rhs)
+    if (dp === null) return null
+    const du = bu.map((x, wi) => (x - touchedList[wi]!.reduce((acc, k) => acc + bm[wi * n + k]! * dp[k]!, 0)) / dd[wi]!)
+    return { dp, du }
+  }
+
+  // Weighs down the pieces the rest cannot explain, and fits tau to how far the windows stray:
+  // each time the fit has settled or had 30 rounds, whichever comes first, three times at most.
+  let mu = 1e-3
+  let reweighs = opts.warm !== undefined ? 3 : opts.quick === true ? 2 : 0
+  let since = 0
+  const maxIter = opts.maxIter ?? 300
+  for (let iter = 0; iter < maxIter; iter += 1) {
+    const rows = system(p, u)
+    const step = stepOf(rows, mu)
     if (step === null) break
-    const next = p.map((v, i) => v + Math.max(-2, Math.min(2, step[i]!)))
+    const clamp = (x: number) => Math.max(-2, Math.min(2, x))
+    const nextP = p.map((v, i) => v + clamp(step.dp[i]!))
+    const nextU = u.map((v, i) => v + clamp(step.du[i]!))
     let isSettled = false
-    if (sumSquares(system(next, false)) < sumSquares(rows)) {
-      p = next
+    if (costAt(nextP, nextU) < sumSquares(rows)) {
+      p = nextP
+      u = nextU
       mu = Math.max(1e-9, mu / 3)
-      isSettled = Math.max(...step.map(Math.abs)) < 1e-7
+      isSettled = Math.max(...step.dp.map(Math.abs), ...step.du.map(Math.abs)) < 1e-7
     } else {
       mu *= 4
       isSettled = mu > 1e9
@@ -550,31 +791,53 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string, borrow: F
         if (isSettled) break
         continue
       }
-      robust = system(p, false)
-        .slice(0, segs.length)
-        .map(row => (row.r < -UNSEEN_AT && segs.length >= UNSEEN_MIN_PIECES ? 0.01 : Math.abs(row.r) <= 2.5 ? 1 : 2.5 / Math.abs(row.r)))
+      const residuals = system(p, u, false).slice(0, segs.length)
+      robust = residuals.map(row => (row.r < -UNSEEN_AT && segs.length >= UNSEEN_MIN_PIECES ? 0.01 : Math.abs(row.r) <= 2.5 ? 1 : 2.5 / Math.abs(row.r)))
+      if (isTauFitted) {
+        // The windows' strays and how sure each is (expectation–maximization).
+        const { dd } = normal(system(p, u), 0)
+        const counted = u.map((x, wi) => (base.some((b, i) => b > 0 && pieceWindow[i] === wi) ? x * x + 1 / dd[wi]! : null)).filter((x): x is number => x !== null)
+        tau = Math.min(TAU_MAX, Math.max(TAU_MIN, Math.sqrt(counted.reduce((a, b) => a + b, 0) / Math.max(1, counted.length))))
+      }
+      const drifting = steps.filter(st => st.announced === 0)
+      if (isTauFitted && drift > 0 && drifting.length > 0) {
+        // Each step's expected square, its uncertainty from the curvature included.
+        const { schur } = normal(system(p, u), 0)
+        const columns = new Map<number, number[] | null>()
+        const cov = (x: number, y: number) => {
+          if (x < 0 || y < 0) return 0
+          if (!columns.has(y)) columns.set(y, solve(schur, schur.map((_, i) => (i === y ? 1 : 0))))
+          return columns.get(y)?.[x] ?? 0
+        }
+        const moved = drifting.map(st => {
+          const a = levelAt(st.newer)
+          const b = levelAt(st.older)
+          const d = p[b]! - (a >= 0 ? p[a]! : 0)
+          return (d * d + cov(b, b) + cov(a, a) - 2 * cov(a, b)) / st.weeks
+        })
+        driftNow = Math.min(DRIFT_MAX, Math.max(DRIFT_MIN, Math.sqrt((DRIFT_PRIOR * drift * drift + moved.reduce((x, y) => x + y, 0)) / (DRIFT_PRIOR + moved.length))))
+      }
       reweighs += 1
       since = 0
       mu = 1e-3
     }
   }
 
-  const { g, f, s } = unpack(p)
+  const g = p.slice(0, nG).map(Math.exp)
+  const f = { [ref]: 1, ...Object.fromEntries(others.map((m, i) => [m, Math.exp(p[nG + i]!)])) } as Record<string, number>
+  const s = { [refPlan]: 1, ...Object.fromEntries(plans.map((pl, i) => [pl, Math.exp(p[nG + nF + i]!)])) } as Record<string, number>
   // The pieces set aside as unseen use, and the rest weighed down.
   const unseen = robust.filter(w => w === 0.01).length
 
-  // 95% bands for each kind's weight against output's, from the curvature at the fit: wide where
-  // the pieces cannot tell two kinds apart (they always came together in the same proportion).
+  // 95% bands for each kind's weight against output's, from the curvature at the fit (each
+  // window's u taken out): wide where the pieces cannot tell two kinds apart (they always came
+  // together in the same proportion).
   const gBand: [number, number][] = (() => {
-    const rows = system(p)
-    const a = Array.from({ length: n }, () => new Array<number>(n).fill(0))
-    let rss = 0
-    for (const { r, j, w } of rows) {
-      rss += w * r * r
-      for (let x = 0; x < n; x += 1) for (let y = 0; y < n; y += 1) a[x]![y]! += w * j[x]! * j[y]!
-    }
+    const rows = system(p, u)
+    const { schur } = normal(rows, 0)
+    const rss = sumSquares(rows)
     const sigma2 = rss / Math.max(1, segs.length - n)
-    const column = (k: number) => solve(a, new Array<number>(n).fill(0).map((_, i) => (i === k ? 1 : 0)))
+    const column = (k: number) => solve(schur, new Array<number>(n).fill(0).map((_, i) => (i === k ? 1 : 0)))
     const c1 = column(1)
     return [0, 1, 2, 3].map(k => {
       const ck = column(k)
@@ -586,21 +849,20 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string, borrow: F
     })
   })()
 
-  const predOf = (sg: Segment) => [0, 1, 2, 3].reduce((acc, k) => acc + g[k]! * models.reduce((a, m) => a + f[m]! * (sg.c[m]?.[k] ?? 0), 0), 0)
-  const misses = segs.map(sg => Math.abs(predOf(sg) / s[sg.plan]! - sg.dy) * 100)
+  const exAt = expOf(p)
+  const predict = (i: number, withWindow: boolean) => pieceAt(i, p, exAt, withWindow ? u[pieceWindow[i]!]! : 0)
+  const misses = segs.map((sg, i) => Math.abs(predict(i, true) - sg.dy) * 100)
   const mae = median(misses)
-  const windows = new Set(segs.map(sg => sg.window)).size
   // How well the pieces pin the two kinds that set a way of use apart: cache reads and writes.
-  const spreadOf = (k: number) => {
+  const bandOf = (k: number) => {
     const [lo, hi] = gBand[k] ?? [0, Infinity]
     return Number.isFinite(hi) && lo > 0 ? hi / lo : Infinity
   }
-  const spread = Math.max(spreadOf(2), spreadOf(3))
-  const confidence =
-    segs.length >= 12 && windows >= 3 && (mae ?? 99) <= 3 && spread <= 4 ? 'high' : segs.length >= 5 && spread <= 15 ? 'medium' : 'low'
-  return {
+  const spread = Math.max(bandOf(2), bandOf(3))
+  const confidence = segs.length >= 12 && nW >= 3 && (mae ?? 99) <= 3 && spread <= 4 ? 'high' : segs.length >= 5 && spread <= 15 ? 'medium' : 'low'
+  const fit: Fit = {
     kind,
-    windows,
+    windows: nW,
     segments: segs.filter(sg => !sg.hit).length,
     hits: segs.filter(sg => sg.hit).length,
     f,
@@ -618,7 +880,41 @@ function fitSegments(kind: string, segs: Segment[], preferRef: string, borrow: F
     confidence,
     ref,
     lent: lent === null ? null : (borrow?.kind ?? null),
+    tau,
+    eras: changes.length,
   }
+  return {
+    fit,
+    p,
+    u,
+    tau,
+    drift: driftNow,
+    robust,
+    pieceWindow,
+    predict,
+  }
+}
+
+// How far the fit misses windows it has not seen: each of the latest windows with a rise enough to
+// say is taken out in turn, the rest fitted again from where the whole fit settled, and the rise
+// of its pieces (those not set aside as unseen use) foretold at its stretch's level. Returns the
+// root mean square of the misses, in logs, and how many windows it rests on.
+function heldOutMiss(kind: string, segs: Segment[], preferRef: string, borrow: Fit | null, whole: Solved): { miss: number; windows: number } | null {
+  const wins = [...new Set(segs.map(sg => sg.window))].sort((a, b) => a - b)
+  if (wins.length < 3) return null
+  const checks: number[] = []
+  for (let wi = wins.length - 1; wi >= 0 && checks.length < HELD_OUT_WINDOWS; wi -= 1) {
+    const pieces = segs.map((sg, i) => i).filter(i => whole.pieceWindow[i] === wi && whole.robust[i]! > 0.5)
+    // A window cut into pieces says its rise by them; its hit would say the same spend again.
+    const own = pieces.some(i => !segs[i]!.hit) ? pieces.filter(i => !segs[i]!.hit) : pieces
+    const rise = own.reduce((a, i) => a + segs[i]!.dy, 0)
+    if (rise < HELD_OUT_MIN_RISE) continue
+    const out = solveSegments(kind, segs, preferRef, borrow, { warm: whole, heldOut: wi, maxIter: 3 })
+    const told = own.reduce((a, i) => a + out.predict(i, false), 0)
+    if (told > 0) checks.push(Math.log(told / rise))
+  }
+  if (checks.length === 0) return null
+  return { miss: Math.sqrt(checks.reduce((a, x) => a + x * x, 0) / checks.length), windows: checks.length }
 }
 
 // The plan a pick puts in force at a moment; null before any pick, or after "not sure".
@@ -725,18 +1021,14 @@ export function fitKind(kind: string, all: readonly Observation[], choices: read
     const at = new Map(windows.map((w, i) => [w, labels[i]!]))
     return raw.map(sg => ({ ...sg, plan: at.get(sg.window)! }))
   }
-  const first = fitSegments(kind, withLabels(), preferRef, borrow)
+  // The first fit holds the level still within each era between official changes: a quiet drift
+  // would follow a change of plan and hide it.
+  const first = solveSegments(kind, withLabels(), preferRef, borrow, { drift: 0, quick: true })
 
   // How far each window's rise strayed from its spend, in logs: positive where a dollar took more.
-  const predicted = (fit: Fit, sg: Segment) =>
-    [0, 1, 2, 3].reduce((acc, k) => acc + fit.g[k]! * Object.entries(sg.c).reduce((a, [m, c]) => a + (fit.f[m] ?? 1) * (c[k] ?? 0), 0), 0)
-  const strays = windows.map((w, i) => {
-    const xs = raw
-      .filter(sg => sg.window === w)
-      .map(sg => Math.log((sg.dy * (first.s[labels[i]!] ?? 1)) / predicted(first, sg)))
-      .filter(Number.isFinite)
-    return median(xs)
-  })
+  const byWindow = new Map<number, number[]>(windows.map(w => [w, []]))
+  raw.forEach((sg, i) => byWindow.get(sg.window)!.push(Math.log(sg.dy / first.predict(i, false))))
+  const strays = windows.map(w => median(byWindow.get(w)!.filter(Number.isFinite)))
 
   const inferredRuns: { label: string; members: number[]; against: string }[] = []
   for (const run of runs) {
@@ -765,7 +1057,9 @@ export function fitKind(kind: string, all: readonly Observation[], choices: read
     }
   }
 
-  const fit = inferredRuns.length === 0 ? first : fitSegments(kind, withLabels(), preferRef, borrow)
+  const segs = withLabels()
+  const solved = solveSegments(kind, segs, preferRef, borrow)
+  const fit = solved.fit
   const inferred: InferredPlan[] = inferredRuns.map(({ label, members, against }) => {
     const ratio = (fit.s[label] ?? 1) / (planScale(fit, against) ?? 1)
     return {
@@ -778,11 +1072,37 @@ export function fitKind(kind: string, all: readonly Observation[], choices: read
       guess: guessPlan(ratio, against),
     }
   })
+  // Official changes since the latest window began: a published one scales the window to come, one
+  // of unknown size leaves the fit to say nothing sure until a window after it is read.
+  const since = OFFICIAL_CHANGES.filter(c => c.kind === kind && c.at > windows[windows.length - 1]! - length)
+  const later = since.some(c => c.x === null) ? null : since.reduce((a, c) => a * c.x!, 1)
+  // Sure as far as the windows it has not seen bear it out: high within 12% (a typical miss, in
+  // logs) on four windows or more, medium within 30% on two; never above low while the kinds that
+  // set a way of use apart are not told apart (cache bands wider than 15 times), or a change of
+  // unknown size has come since.
+  const held = heldOutMiss(kind, segs, preferRef, borrow, solved)
+  const bandOf = (k: number) => {
+    const [lo, hi] = fit.gBand[k] ?? [0, Infinity]
+    return Number.isFinite(hi) && lo > 0 ? hi / lo : Infinity
+  }
+  const isTold = Math.max(bandOf(2), bandOf(3)) <= 15
+  const confidence: Fit['confidence'] =
+    later === null || held === null || !isTold
+      ? 'low'
+      : held.windows >= 4 && held.miss <= 0.12
+        ? 'high'
+        : held.windows >= 2 && held.miss <= 0.3
+          ? 'medium'
+          : 'low'
   return {
     ...fit,
     windowPlans: Object.fromEntries(windows.map((w, i) => [String(w), labels[i]!])),
     latest: labels[labels.length - 1] ?? null,
     inferred,
+    confidence,
+    heldOut: held?.miss ?? null,
+    heldOutWindows: held?.windows ?? 0,
+    later,
   }
 }
 
@@ -1090,6 +1410,19 @@ async function pickPlan($: EngineInterface, value: string): Promise<void> {
   // A reload forgets the last scan: read the transcripts again for it.
   if (lastScan === null) await scanAll($)
   else await refit($)
+}
+
+// A fit's confidence, with its typical miss on windows it had not seen where it has one.
+function sureText(fit: Fit | undefined): string {
+  const level = fit?.confidence ?? 'none'
+  const miss = fit?.heldOut
+  return level === 'none' || miss === null || miss === undefined ? t.confidence[level] : `${t.confidence[level]} ±${Math.round(100 * (Math.exp(miss) - 1))}%`
+}
+
+// What else a fit's details say: what the confidence rests on, the official changes it splits
+// at, and a change since its last window.
+function fitNotes(fit: Fit): string {
+  return `${fit.heldOutWindows ? t.fitHeldOut(fit.heldOutWindows) : ''}${fit.eras ? t.fitEras(fit.eras) : ''}${fit.later === null ? t.fitPending : ''}`
 }
 
 function ago(ms: number): string {
@@ -2064,11 +2397,12 @@ export const register: Register = (on, options) => {
                 {windowLabel(f.kind)}
                 <Text dimColor>
                   {' '}
-                  {t.fitHead(t.confidence[f.confidence], f.segments, f.hits)}
+                  {t.fitHead(sureText(f), f.segments, f.hits)}
                   {f.mae !== null ? t.fitMiss(f.mae.toFixed(1)) : ''}
                   {f.outliers > 0 ? t.fitOutliers(f.outliers) : ''}
                   {f.unseen ? t.fitUnseen(f.unseen) : ''}
                   {f.lent ? t.fitLent(windowLabel(f.lent)) : ''}
+                  {fitNotes(f)}
                 </Text>
               </Text>
               {kindsLine !== '' && (
@@ -2150,7 +2484,7 @@ export const register: Register = (on, options) => {
                 capacityRows.map(({ w, est }) => <Text color={est !== null && w.percentUsed >= 70 ? levelHex(w.percentUsed) : undefined}>{est !== null ? `≈ ${roughUsd(est.remainingUsd)}` : '–'}</Text>),
               )}
               {column(t.colOutlook, capacityRows.map(({ outlook }) => <Text>{outlook || '–'}</Text>))}
-              {column(t.colConfidence, capacityRows.map(({ fit }) => <Text dimColor>{t.confidence[fit?.confidence ?? 'none']}</Text>))}
+              {column(t.colConfidence, capacityRows.map(({ fit }) => <Text dimColor>{sureText(fit)}</Text>))}
             </Box>
           )}
           {hits.map(line => (
@@ -2239,7 +2573,7 @@ export const register: Register = (on, options) => {
                       left: `${t.colLeft} ≈ ${roughUsd(est.remainingUsd)}`,
                       outlook,
                       confidence: fit?.confidence ?? 'none',
-                      confidenceWord: `${t.colConfidence} ${t.confidence[fit?.confidence ?? 'none']}`,
+                      confidenceWord: `${t.colConfidence} ${sureText(fit)}`,
                       hits: costs,
                       hitsLine: costs.length === 0 ? '' : t.hitsLine(windowLabel(w.kind), costs.length, roughUsd(Math.min(...costs)), roughUsd(Math.max(...costs))),
                     },
@@ -2248,7 +2582,7 @@ export const register: Register = (on, options) => {
               )}
               alt={[
                 ...capacityRows.map(({ w, fit, est, outlook }) =>
-                  [windowLabel(w.kind), est !== null ? `${t.colWhole} ≈ ${roughUsd(est.capacityUsd)}` : '', est !== null ? `${t.colLeft} ≈ ${roughUsd(est.remainingUsd)}` : '', outlook, `${t.colConfidence} ${t.confidence[fit?.confidence ?? 'none']}`]
+                  [windowLabel(w.kind), est !== null ? `${t.colWhole} ≈ ${roughUsd(est.capacityUsd)}` : '', est !== null ? `${t.colLeft} ≈ ${roughUsd(est.remainingUsd)}` : '', outlook, `${t.colConfidence} ${sureText(fit)}`]
                     .filter(Boolean)
                     .join(' · '),
                 ),
@@ -2275,14 +2609,14 @@ export const register: Register = (on, options) => {
                 .filter(([m]) => m !== f.ref)
                 .map(([m, value]) => ({ name: shortModel(m), value, color: MODEL_SERIES[Math.min(Math.max(order.indexOf(m), 0), 3)]! }))
               const multiples = Object.entries(f.planWindows).filter(([p]) => p !== f.refPlan && !p.startsWith('~'))
-              const head = `${t.fitCounts(f.segments, f.hits)}${f.mae !== null ? t.fitMiss(f.mae.toFixed(1)) : ''}${f.outliers > 0 ? t.fitOutliers(f.outliers) : ''}${f.unseen ? t.fitUnseen(f.unseen) : ''}${f.lent ? t.fitLent(windowLabel(f.lent)) : ''}`
+              const head = `${t.fitCounts(f.segments, f.hits)}${f.mae !== null ? t.fitMiss(f.mae.toFixed(1)) : ''}${f.outliers > 0 ? t.fitOutliers(f.outliers) : ''}${f.unseen ? t.fitUnseen(f.unseen) : ''}${f.lent ? t.fitLent(windowLabel(f.lent)) : ''}${fitNotes(f)}`
               return (
                 <Box flexDirection="column" rowGap={1}>
                   <Svg
                     source={fitCard({
                       label: windowLabel(f.kind),
                       confidence: f.confidence,
-                      confidenceWord: `${t.colConfidence} ${t.confidence[f.confidence]}`,
+                      confidenceWord: `${t.colConfidence} ${sureText(f)}`,
                       head,
                       kindsTitle: heading(t.kindWeights),
                       kinds,
@@ -2291,7 +2625,7 @@ export const register: Register = (on, options) => {
                       models,
                       unclear: t.undetermined,
                     })}
-                    alt={`${windowLabel(f.kind)} · ${t.colConfidence} ${t.confidence[f.confidence]} · ${head} · ${kinds.map(k => `${k.name} ×${k.value.toFixed(2)}${k.band === null ? ` ${t.undetermined}` : ` (${k.band[0].toFixed(2)}–${k.band[1].toFixed(2)})`}`).join(' · ')}`}
+                    alt={`${windowLabel(f.kind)} · ${t.colConfidence} ${sureText(f)} · ${head} · ${kinds.map(k => `${k.name} ×${k.value.toFixed(2)}${k.band === null ? ` ${t.undetermined}` : ` (${k.band[0].toFixed(2)}–${k.band[1].toFixed(2)})`}`).join(' · ')}`}
                   />
                   {multiples.length > 0 && (
                     <Text dimColor>

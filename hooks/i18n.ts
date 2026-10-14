@@ -106,6 +106,9 @@ const en = {
   fitOutliers: (n: number) => ` · ${n} outliers`,
   fitLent: (kind: string) => ` · leaning on the ${kind} fit`,
   fitUnseen: (n: number) => ` · ${n} piece${n > 1 ? 's' : ''} likely with use from elsewhere, set aside`,
+  fitHeldOut: (n: number) => ` · ± is the typical miss on the latest ${n} window${n > 1 ? 's' : ''}, each foretold from the rest`,
+  fitEras: (n: number) => ` · split at ${n} official limit change${n > 1 ? 's' : ''}`,
+  fitPending: ' · limits changed officially after the last window read: unsure until a window after the change',
   kindWeights: 'Per API dollar, against output: ',
   undetermined: 'unclear',
   against: (ref: string) => `Against ${ref}: `,
@@ -116,7 +119,7 @@ const en = {
   inferredLine: (from: string, to: string, ratio: string, against: string, guess: string | null, n: number) =>
     `${from} – ${to}: ×${ratio} of ${against}${guess !== null ? `, likely ${guess}` : ''} (inferred, ${n} windows)`,
   dataNote:
-    'From the Claude Code transcripts on this machine (subagents included); claude.ai and other devices are not in them. API-equivalent uses list prices (override in token-almanac/prices.json). Estimates fit pieces of 5 points or more and past limit hits, as model factor × token kind factor and plan multiples. Before the plan you pick, a stretch whose rate moved by 1.8× or more is taken as another plan. How limits are counted is not published: these are inferences.',
+    'From the Claude Code transcripts on this machine (subagents included); claude.ai and other devices are not in them. API-equivalent uses list prices (override in token-almanac/prices.json). Estimates fit pieces of 5 points or more and past limit hits, as model factor × token kind factor and plan multiples, with each window free to run a little large or small, a level that steps at official limit changes and drifts slowly between them. Before the plan you pick, a stretch whose rate moved by 1.8× or more is taken as another plan. Confidence is how well the latest windows are foretold from the others. How limits are counted is not published: these are inferences.',
   unpriced: (list: string) => ` Not priced, counted as 0: ${list}.`,
 }
 
@@ -211,6 +214,9 @@ const zh: Messages = {
   fitOutliers: n => ` · ${n} 段离群`,
   fitLent: kind => ` · 参照 ${kind}窗口`,
   fitUnseen: n => ` · ${n} 段疑似有本机之外的用量，已排除`,
+  fitHeldOut: n => ` · ± 为最近 ${n} 个窗口逐个留出、用其余窗口预测的典型误差`,
+  fitEras: n => ` · 按 ${n} 次官方额度调整分段`,
+  fitPending: ' · 最后读到的窗口之后官方调整过额度，读到调整后的窗口前不作准',
   kindWeights: '每 API 美元相对 output：',
   undetermined: '未定',
   against: ref => `相对 ${ref}：`,
@@ -220,7 +226,7 @@ const zh: Messages = {
   planHint: '选择你的套餐后，推算会按该套餐给出；未选择时按相对倍数显示。',
   inferredLine: (from, to, ratio, against, guess, n) => `${from} – ${to}：约为 ${against} 的 ×${ratio}${guess !== null ? `，可能是 ${guess}` : ''}（推测，${n} 个窗口）`,
   dataNote:
-    '数据来自本机的 Claude Code 会话记录（含子代理），不含网页版和其他设备。折算按官方 API 价格（可用 token-almanac/prices.json 覆盖）。推算用每涨 5 个点的分段和历史触限，拟合模型系数 × token 类型系数与套餐倍数；所选套餐之前，比率变化 1.8 倍以上的时段视为另一个套餐。限额的真实算法未公开，结果是推断。',
+    '数据来自本机的 Claude Code 会话记录（含子代理），不含网页版和其他设备。折算按官方 API 价格（可用 token-almanac/prices.json 覆盖）。推算用每涨 5 个点的分段和历史触限，拟合模型系数 × token 类型系数与套餐倍数，允许每个窗口略大或略小，额度水平在官方调整处分段、其间缓慢漂移；所选套餐之前，比率变化 1.8 倍以上的时段视为另一个套餐。可信度看最近的窗口能否由其余窗口预测准。限额的真实算法未公开，结果是推断。',
   unpriced: list => ` 未定价、按 0 计：${list}。`,
 }
 

@@ -71,6 +71,17 @@ export type Fit = {
   ref: string | null
   // The window kind whose fit this one leaned on for its kinds' and models' weights, if any.
   lent?: string | null
+  // How far one window's size strays from its kind's level, in logs.
+  tau?: number
+  // Official changes to the window's size the windows span, each given a level of its own.
+  eras?: number
+  // The typical miss (root mean square, in logs) on the latest windows, each foretold by a fit of
+  // the rest, and how many windows that rests on; null when too few windows say.
+  heldOut?: number | null
+  heldOutWindows?: number
+  // Published changes to the window's size since the latest window began, multiplied; null when
+  // one of them was of a size not published.
+  later?: number | null
 }
 
 // A stretch of windows with no pick behind it whose share per API dollar moved apart from the
